@@ -9,6 +9,7 @@ Driven by per-show YAML configs; all logic lives in `core/`.
 subtitle-pipeline/
 ├── translate.py          # translation CLI
 ├── transcribe.py         # transcription CLI
+├── verify.py             # quality-verification CLI (report only, no writes)
 ├── core/
 │   ├── config.py         # ShowConfig dataclass + YAML loader
 │   ├── translator.py     # Gemini Worker agent, chunking, state engine
@@ -43,6 +44,7 @@ terminology: {}                   # optional — reserved for future use
 - State:  `/home/admin/subtitle-pipeline-state/<show-slug>/`
 - Logs:   `/home/admin/logs/subtitle-pipeline-<show-slug>-translate.log`
           `/home/admin/logs/subtitle-pipeline-<show-slug>-transcribe.log`
+          `/home/admin/logs/subtitle-pipeline-<show-slug>-verify.log`
 
 ## API Keys
 
@@ -73,6 +75,38 @@ python3 transcribe.py --show shows/pumuckl-1982.yaml S02E01
 |-----|--------|
 | `DRY_RUN=1` | Same as `--dry-run` |
 | `FORCE=1`   | Same as `--force` |
+
+## Verification
+
+`verify.py` fetches both language SRT files from VM 113, runs structural and
+content checks, and prints a pass/fail report. It makes no changes.
+
+```bash
+python3 verify.py --show shows/pumuckl-1982.yaml          # full show
+python3 verify.py --show shows/pumuckl-1982.yaml S02      # single season
+python3 verify.py --show shows/pumuckl-1982.yaml S01E11   # single episode
+```
+
+**Checks run on both files:**
+- File exists and is non-empty
+- All timestamps parse correctly and are in ascending order
+- No block duration exceeds 60 seconds
+- Block count > 10, no duplicate block numbers
+- No encoding artefacts (mojibake sequences)
+- No spam watermarks (`opensubtitles`, `subscene`, etc.)
+- No markdown fences
+
+**Source-language file additionally:**
+- No English fragments (` the `, ` and `, ` of `)
+
+**Target-language file additionally:**
+- No untranslated source-language words (≥ 2 indicators per block required)
+- No reasoning leakage (`<thinking>`, `reasoning:`, etc.)
+- No bold markers (`**`)
+
+Log: `/home/admin/logs/subtitle-pipeline-<show-slug>-verify.log`
+
+---
 
 ## Adding a New Show
 
