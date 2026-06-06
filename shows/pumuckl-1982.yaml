@@ -3,6 +3,8 @@ media_dir: "/data/tv/Pumuckl (1982)"
 source_lang: "de"
 target_lang: "en"
 chunk_size: 100
+media_host: "192.168.0.113"
+media_user: "admin"
 
 system_prompt: |
   You are translating German subtitles to English for the 1982 Bavarian children's show "Pumuckl."

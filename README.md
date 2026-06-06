@@ -17,18 +17,22 @@ subtitle-pipeline/
 │   ├── srt.py            # SRT parsing, validation, wrapping
 │   └── transfer.py       # SSH/SCP helpers, retry logic
 └── shows/
-    ├── pumuckl-1982.yaml
-    └── neue-geschichten.yaml
+    └── your-show.yaml        # one YAML file per show
 ```
+
+> The `shows/` directory ships with two example configs (`pumuckl-1982.yaml`, `neue-geschichten.yaml`)
+> demonstrating the schema. Add your own show by copying one as a template — see [Adding a New Show](#adding-a-new-show).
 
 ## YAML Schema
 
 ```yaml
 name: "Show Name (Year)"          # required — also used to derive the show slug
-media_dir: "/data/tv/Show Name"   # path on VM 113 (192.168.0.113)
+media_dir: "/data/tv/Show Name"   # path on the media server
 source_lang: "de"                 # required
 target_lang: "en"                 # required
 chunk_size: 100                   # blocks per API call (default 100)
+media_host: "192.168.0.113"       # SSH host of the media server (default 192.168.0.113)
+media_user: "admin"               # SSH user on the media server (default admin)
 
 system_prompt: |                  # required — Gemini Worker system instructions
   ...

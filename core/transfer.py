@@ -2,18 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 core/transfer.py
-SSH/SCP helpers and retry logic for VM 113 file transfers.
+SSH/SCP helpers and retry logic for remote media-server file transfers.
 """
 
 import os
 import subprocess
 import logging
 import time
-
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-VM113    = "192.168.0.113"
-SSH_USER = "admin"
 
 # ── Retry Helper ──────────────────────────────────────────────────────────────
 
@@ -32,32 +27,34 @@ def with_retry(label: str, fn, attempts: int = 3, backoff: int = 10):
 
 # ── SSH / SCP Helpers ─────────────────────────────────────────────────────────
 
-def run_ssh(cmd: str, check: bool = True) -> subprocess.CompletedProcess:
-    """Executes a command on VM 113 via SSH."""
+def run_ssh(cmd: str, host: str, user: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Executes a command on the media server via SSH."""
     full_cmd = [
         "timeout", "60", "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-        f"{SSH_USER}@{VM113}", cmd,
+        f"{user}@{host}", cmd,
     ]
     return subprocess.run(full_cmd, capture_output=True, text=True, check=check)
 
 
-def download_file(remote_path: str, local_path: str, retries: int = 3, backoff: int = 10) -> None:
-    """SCP a file from VM 113 to a local path, with retries."""
+def download_file(remote_path: str, local_path: str, host: str, user: str,
+                  retries: int = 3, backoff: int = 10) -> None:
+    """SCP a file from the media server to a local path, with retries."""
     def _do():
         subprocess.run(
             ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             f"{SSH_USER}@{VM113}:{remote_path}", local_path],
+             f"{user}@{host}:{remote_path}", local_path],
             check=True,
         )
     with_retry(f"download {os.path.basename(remote_path)}", _do, attempts=retries, backoff=backoff)
 
 
-def upload_file(local_path: str, remote_path: str, retries: int = 3, backoff: int = 10) -> None:
-    """SCP a local file to VM 113, with retries."""
+def upload_file(local_path: str, remote_path: str, host: str, user: str,
+                retries: int = 3, backoff: int = 10) -> None:
+    """SCP a local file to the media server, with retries."""
     def _do():
         subprocess.run(
             ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             local_path, f"{SSH_USER}@{VM113}:{remote_path}"],
+             local_path, f"{user}@{host}:{remote_path}"],
             check=True,
         )
-    with_retry(f"upload {os.path.basename(local_path)}", _do, attempts=retries, backoff=backoff)
+    with_retry(f"upload {os.path.basename(remote_path)}", _do, attempts=retries, backoff=backoff)

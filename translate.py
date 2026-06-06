@@ -68,22 +68,23 @@ async def main() -> None:
         cfg.name, target, dry_run, force, cfg.chunk_size,
     )
 
-    # Verify SSH connection to VM 113
+    # Verify SSH connection to media server
     try:
-        res = run_ssh("true", check=False)
+        res = run_ssh("true", cfg.media_host, cfg.media_user, check=False)
         if res.returncode != 0:
-            logging.critical("Unable to connect to VM 113 via SSH. Please ensure authorization is correct.")
+            logging.critical("Unable to connect to %s via SSH. Please ensure authorization is correct.", cfg.media_host)
             sys.exit(1)
     except Exception as e:
-        logging.critical("SSH to VM 113 failed: %s", e)
+        logging.critical("SSH to %s failed: %s", cfg.media_host, e)
         sys.exit(1)
 
-    # Find source SRT files on VM 113
+    # Find source SRT files on media server
     try:
-        res = run_ssh(f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}*.srt' | sort")
+        res = run_ssh(f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}*.srt' | sort",
+                      cfg.media_host, cfg.media_user)
         srt_paths = [p.strip() for p in res.stdout.splitlines() if p.strip()]
     except Exception as e:
-        logging.critical("Failed to search files on VM 113: %s", e)
+        logging.critical("Failed to search files on %s: %s", cfg.media_host, e)
         sys.exit(1)
 
     # Accumulate usage across all episodes in this run
@@ -117,7 +118,8 @@ async def main() -> None:
 
         # Locate MKV path alongside SRT
         try:
-            res_mkv = run_ssh(f"find '{cfg.media_dir}' -name '*{ep_id}*.mkv' 2>/dev/null | head -1", check=False)
+            res_mkv = run_ssh(f"find '{cfg.media_dir}' -name '*{ep_id}*.mkv' 2>/dev/null | head -1",
+                              cfg.media_host, cfg.media_user, check=False)
             mkv_path = res_mkv.stdout.strip()
         except Exception:
             mkv_path = ""

@@ -30,6 +30,8 @@ class ShowConfig:
     chunk_size:        int             = 100
     assemblyai_prompt: str             = ""
     terminology:       Dict[str, str]  = field(default_factory=dict)
+    media_host:        str             = "192.168.0.113"
+    media_user:        str             = "admin"
 
     # Derived at load time — not present in YAML
     show_slug:      str = ""
@@ -90,6 +92,8 @@ def load_show(path: str) -> ShowConfig:
         chunk_size    = int(raw.get('chunk_size', 100)),
         assemblyai_prompt = raw.get('assemblyai_prompt', ''),
         terminology   = raw.get('terminology') or {},
+        media_host    = raw.get('media_host', '192.168.0.113'),
+        media_user    = raw.get('media_user', 'admin'),
         show_slug     = slug,
         state_dir     = state_dir,
         translate_log  = f"{log_base}-translate.log",

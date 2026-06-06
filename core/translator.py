@@ -157,10 +157,11 @@ def resume_state(episode: str, state_dir: str) -> Dict[str, Any]:
 
 # ── Pre-flight Checks ─────────────────────────────────────────────────────────
 
-def preflight(srt_path: str) -> int:
+def preflight(srt_path: str, host: str, user: str) -> int:
     """Performs safety checks on source file and returns block count (0 = fail)."""
     try:
-        res = run_ssh(f"grep -cE '^[[:space:]]*[0-9]+[[:space:]]*$' '{srt_path}'", check=False)
+        res = run_ssh(f"grep -cE '^[[:space:]]*[0-9]+[[:space:]]*$' '{srt_path}'",
+                      host, user, check=False)
         block_count = int(res.stdout.strip()) if res.stdout.strip().isdigit() else 0
     except Exception as e:
         logging.error("Pre-flight SSH command failed: %s", e)
@@ -171,7 +172,7 @@ def preflight(srt_path: str) -> int:
         return 0
 
     try:
-        res_size = run_ssh(f"stat -c%s '{srt_path}'")
+        res_size = run_ssh(f"stat -c%s '{srt_path}'", host, user)
         file_size = int(res_size.stdout.strip())
     except Exception:
         file_size = 0
@@ -365,7 +366,7 @@ async def process_episode(
     # Skip Check
     if not force:
         try:
-            res = run_ssh(f"test -f '{out_srt_path}'", check=False)
+            res = run_ssh(f"test -f '{out_srt_path}'", cfg.media_host, cfg.media_user, check=False)
             if res.returncode == 0:
                 logging.info("SKIP: Output subtitle already exists at %s", out_srt_path)
                 return
@@ -373,7 +374,7 @@ async def process_episode(
             pass
 
     # Pre-flight
-    source_blocks = preflight(srt_path)
+    source_blocks = preflight(srt_path, cfg.media_host, cfg.media_user)
     if source_blocks == 0:
         logging.error("Episode %s skipped because pre-flight failed", episode_id)
         return
@@ -410,8 +411,8 @@ async def process_episode(
 
     # SCP Download Source SRT
     local_srt = os.path.join(work_dir, "source.srt")
-    logging.info("Downloading source SRT from VM 113 to local path: %s", local_srt)
-    download_file(srt_path, local_srt)
+    logging.info("Downloading source SRT to local path: %s", local_srt)
+    download_file(srt_path, local_srt, cfg.media_host, cfg.media_user)
 
     # Parse blocks with Sig/BOM normalization
     with open(local_srt, "r", encoding="utf-8-sig") as f:
@@ -493,8 +494,8 @@ async def process_episode(
     logging.info("FINAL VALIDATION SUCCESS: %d/%d blocks match perfectly.", final_count, source_blocks)
 
     # Upload
-    logging.info("Uploading completed subtitles to VM 113 at %s", out_srt_path)
-    upload_file(final_srt_local, out_srt_path)
+    logging.info("Uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
+    upload_file(final_srt_local, out_srt_path, cfg.media_host, cfg.media_user)
 
     # Complete State
     state['status'] = 'complete'

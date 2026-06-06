@@ -56,22 +56,23 @@ def main() -> None:
     if not setup_assemblyai():
         sys.exit(1)
 
-    # Verify SSH connection to VM 113
+    # Verify SSH connection to media server
     try:
-        res = run_ssh("true", check=False)
+        res = run_ssh("true", cfg.media_host, cfg.media_user, check=False)
         if res.returncode != 0:
-            logging.critical("Unable to connect to VM 113 via SSH. Please ensure authorization is correct.")
+            logging.critical("Unable to connect to %s via SSH. Please ensure authorization is correct.", cfg.media_host)
             sys.exit(1)
     except Exception as e:
-        logging.critical("SSH to VM 113 failed: %s", e)
+        logging.critical("SSH to %s failed: %s", cfg.media_host, e)
         sys.exit(1)
 
-    # Find MKV files on VM 113
+    # Find MKV files on media server
     try:
-        res = run_ssh(f"find '{cfg.media_dir}' -name '*.mkv' | sort")
+        res = run_ssh(f"find '{cfg.media_dir}' -name '*.mkv' | sort",
+                      cfg.media_host, cfg.media_user)
         mkv_paths = [p.strip() for p in res.stdout.splitlines() if p.strip()]
     except Exception as e:
-        logging.critical("Failed to search MKV files on VM 113: %s", e)
+        logging.critical("Failed to search MKV files on %s: %s", cfg.media_host, e)
         sys.exit(1)
 
     results      = {}

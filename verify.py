@@ -198,7 +198,7 @@ def main() -> None:
 
     # Verify SSH
     try:
-        res = run_ssh("true", check=False)
+        res = run_ssh("true", cfg.media_host, cfg.media_user, check=False)
         if res.returncode != 0:
             logging.critical("Unable to connect to VM 113 via SSH.")
             sys.exit(1)
@@ -209,7 +209,8 @@ def main() -> None:
     # Discover source SRT files
     try:
         res = run_ssh(
-            f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}.srt' | sort"
+            f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}.srt' | sort",
+            cfg.media_host, cfg.media_user,
         )
         srt_paths = [p.strip() for p in res.stdout.splitlines() if p.strip()]
     except Exception as e:
@@ -259,7 +260,7 @@ def main() -> None:
             ]:
                 exists = run_ssh(
                     f'test -f "{remote}" && echo EXISTS || echo MISSING',
-                    check=False,
+                    cfg.media_host, cfg.media_user, check=False,
                 )
                 if 'EXISTS' not in exists.stdout:
                     issue_list.append("File missing")
@@ -267,7 +268,8 @@ def main() -> None:
                     continue
 
                 try:
-                    download_file(remote, local, retries=2, backoff=5)
+                    download_file(remote, local, cfg.media_host, cfg.media_user,
+                                  retries=2, backoff=5)
                 except Exception as e:
                     issue_list.append(f"Download failed: {e}")
                     logging.error("%s [%s]: download failed: %s", ep_id, lang, e)

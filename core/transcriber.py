@@ -86,7 +86,8 @@ def transcribe_episode(mkv_basename: str, cfg: ShowConfig) -> bool:
     srt_remote = f"{cfg.media_dir}/{mkv_basename}.{sl}.srt"
 
     # Skip if already done
-    check = run_ssh(f'test -f "{srt_remote}" && echo EXISTS || echo MISSING', check=False)
+    check = run_ssh(f'test -f "{srt_remote}" && echo EXISTS || echo MISSING',
+                    cfg.media_host, cfg.media_user, check=False)
     if check.returncode == 0 and "EXISTS" in check.stdout:
         logging.info("SKIP %s — .%s.srt already exists", mkv_basename, sl)
         return True
@@ -98,9 +99,9 @@ def transcribe_episode(mkv_basename: str, cfg: ShowConfig) -> bool:
     srt_local = os.path.join(tmpdir, f"{mkv_basename}.{sl}.srt")
 
     try:
-        # 1. Download MKV from VM 113
+        # 1. Download MKV from media server
         logging.info("Downloading MKV from VM 113 …")
-        download_file(mkv_remote, mkv_local)
+        download_file(mkv_remote, mkv_local, cfg.media_host, cfg.media_user)
 
         # 2. Extract audio
         logging.info("Extracting audio …")
@@ -123,10 +124,10 @@ def transcribe_episode(mkv_basename: str, cfg: ShowConfig) -> bool:
             fh.write(srt_text)
 
         logging.info("Uploading .%s.srt to VM 113 …", sl)
-        upload_file(srt_local, srt_remote)
+        upload_file(srt_local, srt_remote, cfg.media_host, cfg.media_user)
 
         # 5. Verify
-        verify = run_ssh(f'ls -la "{srt_remote}"', check=False)
+        verify = run_ssh(f'ls -la "{srt_remote}"', cfg.media_host, cfg.media_user, check=False)
         if verify.returncode != 0:
             logging.error("Verification failed — .%s.srt not found on VM 113 after upload", sl)
             return False
