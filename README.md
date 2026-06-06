@@ -61,16 +61,16 @@ terminology: {}                   # optional — reserved for future use
 
 ```bash
 # Translation
-python3 translate.py --show shows/pumuckl-1982.yaml all
-python3 translate.py --show shows/pumuckl-1982.yaml S02
-python3 translate.py --show shows/pumuckl-1982.yaml S02E01
-python3 translate.py --show shows/pumuckl-1982.yaml --dry-run S02E01
-python3 translate.py --show shows/pumuckl-1982.yaml --force S02E01
-python3 translate.py --show shows/pumuckl-1982.yaml --chunk-size 50 S02
+python3 translate.py --show shows/your-show.yaml all
+python3 translate.py --show shows/your-show.yaml S02
+python3 translate.py --show shows/your-show.yaml S02E01
+python3 translate.py --show shows/your-show.yaml --dry-run S02E01
+python3 translate.py --show shows/your-show.yaml --force S02E01
+python3 translate.py --show shows/your-show.yaml --chunk-size 50 S02
 
 # Transcription
-python3 transcribe.py --show shows/pumuckl-1982.yaml all
-python3 transcribe.py --show shows/pumuckl-1982.yaml S02E01
+python3 transcribe.py --show shows/your-show.yaml all
+python3 transcribe.py --show shows/your-show.yaml S02E01
 ```
 
 ## Env Var Overrides
@@ -82,13 +82,13 @@ python3 transcribe.py --show shows/pumuckl-1982.yaml S02E01
 
 ## Verification
 
-`verify.py` fetches both language SRT files from VM 113, runs structural and
+`verify.py` fetches both language SRT files from the configured media server, runs structural and
 content checks, and prints a pass/fail report. It makes no changes.
 
 ```bash
-python3 verify.py --show shows/pumuckl-1982.yaml          # full show
-python3 verify.py --show shows/pumuckl-1982.yaml S02      # single season
-python3 verify.py --show shows/pumuckl-1982.yaml S01E11   # single episode
+python3 verify.py --show shows/your-show.yaml          # full show
+python3 verify.py --show shows/your-show.yaml S02      # single season
+python3 verify.py --show shows/your-show.yaml S01E11   # single episode
 ```
 
 **Checks run on both files:**
@@ -117,4 +117,4 @@ Log: `/home/admin/logs/subtitle-pipeline-<show-slug>-verify.log`
 1. Copy `shows/neue-geschichten.yaml` as a template.
 2. Fill in `name`, `media_dir`, `source_lang`, `target_lang`, `system_prompt`.
 3. Optionally add `assemblyai_prompt` if transcription is needed.
-4. Run `--dry-run all` to verify VM 113 discovery before translating.
+4. Run `--dry-run all` to verify media server discovery before translating.
