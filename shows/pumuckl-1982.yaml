@@ -1,0 +1,60 @@
+name: "Pumuckl (1982)"
+media_dir: "/data/tv/Pumuckl (1982)"
+source_lang: "de"
+target_lang: "en"
+chunk_size: 100
+
+system_prompt: |
+  You are translating German subtitles to English for the 1982 Bavarian children's show "Pumuckl."
+
+  Rules — follow ALL of them exactly:
+  - Preserve ALL SRT sequence numbers and timestamps EXACTLY, character-for-character.
+  - Strip <font color=...> tags but keep the dialogue text inside them (no font tags in output).
+  - Preserve ♪ music symbols unchanged.
+  - Translate stage directions meaningfully: (Titelmusik)→(Theme music), (Lacht)→(Laughs), (Weint)→(Cries), (Schreit)→(Shouts), etc.
+  - "Kobold" must ALWAYS translate to "sprite".
+  - Preserve the Bavarian German nuances:
+    * Pumuckl must speak in playful rhymes, childlike exclamations, and playful mischief. Preserve his voice, energy, and maintain rhyme where possible.
+    * Eder must sound gruff but warm-hearted — keep his speech plain, direct, and unhurried.
+  - Write natural, lively English suitable for a children's show — not stiff or literal.
+  - Output ONLY valid SRT content. No preamble, no explanation, no markdown, no code fences.
+
+  Examples of desired tone:
+  Source:
+  1
+  00:00:01,000 --> 00:00:04,000
+  Was ist denn das?
+  Ein Kobold, ein Kobold, der bleibt niemals stumm,
+  er springt und er tanzt in der Werkstatt herum!
+
+  Target:
+  1
+  00:00:01,000 --> 00:00:04,000
+  What is that?
+  A sprite, a sprite, is never too quiet,
+  he jumps and he dances and causes a riot!
+
+assemblyai_prompt: |
+  This is a German audio track from "Meister Eder und sein Pumuckl", a 1982 Bavarian children's television series. The audio is in Bavarian German dialect, not standard High German.
+
+  Main characters:
+  - Pumuckl: an invisible sprite (Kobold) with a high-pitched, childlike voice who speaks in rhymes and playful exclamations. His voice is performed at an unnaturally high pitch. He is mischievous and energetic.
+  - Meister Eder: an older Bavarian carpenter (Schreiner) who speaks in deep, unhurried Central Bavarian dialect. He is gruff but warm-hearted.
+
+  Key proper nouns to transcribe accurately:
+  - Pumuckl (the sprite's name — always spelled this way)
+  - Kobold (means sprite or goblin)
+  - Meister Eder (the carpenter — "Meister" is his title)
+  - Werkstatt (the carpenter's workshop where most scenes take place)
+  - Koboldschande (a compound word meaning "sprite's disgrace" — an important concept)
+  - Schreiner (carpenter)
+
+  Dialect notes:
+  - Meister Eder uses authentic Central Bavarian speech patterns: "gell" instead of "nicht wahr", "des" instead of "das", dropping of final consonants, Bavarian diminutives
+  - Standard German words may appear in Bavarian phonetic form
+  - There is occasional code-switching between Bavarian dialect and standard High German
+
+  Audio characteristics:
+  - Pumuckl's voice is intentionally pitch-shifted and may be difficult to parse — transcribe what is intelligible and leave gaps for unintelligible sections rather than guessing
+  - Background sounds include workshop noise (sawing, hammering) which should be ignored
+  - There is a theme song at the start of each episode with sung lyrics

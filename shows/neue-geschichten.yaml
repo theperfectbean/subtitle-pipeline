@@ -1,0 +1,11 @@
+name: "Neue Geschichten vom Pumuckl"
+media_dir: "/data/tv/Neue Geschichten vom Pumuckl"
+source_lang: "de"
+target_lang: "en"
+chunk_size: 100
+
+system_prompt: |
+  # TODO: Add translation system prompt for Neue Geschichten vom Pumuckl
+
+assemblyai_prompt: |
+  # TODO: Add AssemblyAI transcription prompt for Neue Geschichten vom Pumuckl
