@@ -1,6 +1,6 @@
 # subtitle-pipeline
 
-Generalised subtitle translation and transcription pipeline for homelab media.
+Generalised subtitle translation and transcription pipeline for foreign-language media.
 Driven by per-show YAML configs; all logic lives in `core/`.
 
 ## Structure
