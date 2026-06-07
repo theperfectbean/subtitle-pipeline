@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 transcribe.py
-CLI entry point for the AssemblyAI transcription pipeline.
+CLI entry point for the subtitle transcription pipeline.
 
 Usage:
   python3 transcribe.py --show shows/pumuckl-1982.yaml S02E01
@@ -16,9 +16,13 @@ import re
 import logging
 import argparse
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from core.config import load_show
 from core.transfer import run_ssh
-from core.transcriber import setup_assemblyai, transcribe_episode
+from core.pipeline import transcribe_episode
+from core.backends.assemblyai import AssemblyAITranscriptionBackend
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 
@@ -53,8 +57,12 @@ def main() -> None:
 
     logging.info("=== Transcription Run: show=%s, target=%s ===", cfg.name, target)
 
-    if not setup_assemblyai():
+    # Build transcription backend
+    key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+    if not key:
+        logging.critical("ASSEMBLYAI_API_KEY not set in environment or .env")
         sys.exit(1)
+    backend = AssemblyAITranscriptionBackend(key)
 
     # Verify SSH connection to media server
     try:
@@ -75,7 +83,7 @@ def main() -> None:
         logging.critical("Failed to search MKV files on %s: %s", cfg.media_host, e)
         sys.exit(1)
 
-    results      = {}
+    results       = {}
     found_episodes = 0
 
     for mkv_path in mkv_paths:
@@ -97,12 +105,11 @@ def main() -> None:
                 sys.exit(1)
 
         found_episodes += 1
-        # basename is the full filename without .mkv extension
         basename = os.path.basename(mkv_path)
         if basename.endswith('.mkv'):
             basename = basename[:-4]
 
-        ok = transcribe_episode(basename, cfg)
+        ok = transcribe_episode(basename, cfg, backend)
         results[ep_id] = 'ok' if ok else 'FAILED'
 
     if found_episodes == 0:

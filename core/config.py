@@ -27,11 +27,14 @@ class ShowConfig:
     system_prompt: str
 
     # Optional YAML fields with defaults
-    chunk_size:        int             = 100
-    assemblyai_prompt: str             = ""
-    terminology:       Dict[str, str]  = field(default_factory=dict)
-    media_host:        str             = "192.168.0.113"
-    media_user:        str             = "admin"
+    chunk_size:             int             = 100
+    assemblyai_prompt:      str             = ""
+    terminology:            Dict[str, str]  = field(default_factory=dict)
+    media_host:             str             = "192.168.0.113"
+    media_user:             str             = "admin"
+    translation_backend:    str             = "gemini"
+    transcription_backend:  str             = "assemblyai"
+    gemini_model:           str             = "gemini-2.0-flash"
 
     # Derived at load time — not present in YAML
     show_slug:      str = ""
@@ -92,8 +95,11 @@ def load_show(path: str) -> ShowConfig:
         chunk_size    = int(raw.get('chunk_size', 100)),
         assemblyai_prompt = raw.get('assemblyai_prompt', ''),
         terminology   = raw.get('terminology') or {},
-        media_host    = raw.get('media_host', '192.168.0.113'),
-        media_user    = raw.get('media_user', 'admin'),
+        media_host             = raw.get('media_host', '192.168.0.113'),
+        media_user             = raw.get('media_user', 'admin'),
+        translation_backend    = raw.get('translation_backend', 'gemini'),
+        transcription_backend  = raw.get('transcription_backend', 'assemblyai'),
+        gemini_model           = raw.get('gemini_model', 'gemini-2.0-flash'),
         show_slug     = slug,
         state_dir     = state_dir,
         translate_log  = f"{log_base}-translate.log",

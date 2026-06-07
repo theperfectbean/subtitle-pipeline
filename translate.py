@@ -18,9 +18,25 @@ import logging
 import asyncio
 import argparse
 
-from core.config import load_show
+from dotenv import load_dotenv
+load_dotenv()
+
+from core.config import load_show, ShowConfig
 from core.transfer import run_ssh
-from core.translator import process_episode, log_usage_summary, make_usage_tracker
+from core.pipeline import process_episode, log_usage_summary, make_usage_tracker
+from core.backends.base import TranslationBackend
+from core.backends.gemini import GeminiTranslationBackend
+
+# ── Backend Factory ───────────────────────────────────────────────────────────
+
+def _make_translation_backend(cfg: ShowConfig) -> TranslationBackend:
+    if cfg.translation_backend == "gemini":
+        key = os.environ.get("GEMINI_API_KEY", "")
+        if not key:
+            logging.critical("GEMINI_API_KEY not set in environment or .env")
+            sys.exit(1)
+        return GeminiTranslationBackend(key, cfg.system_prompt, cfg.gemini_model)
+    raise ValueError(f"Unknown translation_backend: {cfg.translation_backend!r}")
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 
@@ -87,6 +103,9 @@ async def main() -> None:
         logging.critical("Failed to search files on %s: %s", cfg.media_host, e)
         sys.exit(1)
 
+    # Build translation backend once per run
+    backend = _make_translation_backend(cfg)
+
     # Accumulate usage across all episodes in this run
     usage = make_usage_tracker()
     found_episodes = 0
@@ -125,7 +144,8 @@ async def main() -> None:
             mkv_path = ""
 
         try:
-            await process_episode(ep_id, srt_path, mkv_path, cfg, dry_run=False, force=force, usage=usage)
+            await process_episode(ep_id, srt_path, mkv_path, cfg, backend,
+                                   dry_run=False, force=force, usage=usage)
         except Exception as e:
             logging.exception("Exception raised while processing %s: %s", ep_id, e)
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-core/translator.py
-All translation machinery — Worker agent, chunking, state engine, retry/split logic.
+core/pipeline.py
+Backend-agnostic pipeline — chunking, validation, retry/split-fallback, state
+engine, and per-episode orchestration for both translation and transcription.
 """
 
 import sys
@@ -10,19 +11,19 @@ import os
 import json
 import logging
 import asyncio
-import re
 import math
 import shutil
+import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional
 
-from google.antigravity import Agent, LocalAgentConfig, GenerationConfig, ThinkingLevel
-from google.antigravity.types import GeminiConfig, ModelConfig, ModelEntry
-from google.antigravity.hooks import policy
-
 from .config import ShowConfig
 from .srt import parse_srt, render_blocks, wrap_subtitle_text, strip_fences, validate_translation_structure
-from .transfer import run_ssh, download_file, upload_file
+from .transfer import run_ssh, download_file, upload_file, with_retry
+from .backends.base import (
+    TranslationBackend, TranscriptionBackend,
+    RateLimitError, ContextLengthError, TransientAPIError, TranscriptionError,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -30,44 +31,6 @@ MIN_CHUNK_SIZE  = 1
 MAX_RETRIES     = 3
 API_CALL_BUDGET = 200   # hard ceiling on API calls per episode before aborting
 WORKER_TIMEOUT  = 120   # seconds before a single model call is considered hung
-
-# Pricing rates for gemini-3.5-flash
-PRICE_PER_M_INPUT  = 0.075
-PRICE_PER_M_OUTPUT = 0.30
-PRICE_PER_M_CACHED = 0.01875
-
-# ── API Key ───────────────────────────────────────────────────────────────────
-
-_API_KEY_PATH = "/home/admin/.google_api_key"
-_API_KEY      = ""
-
-if os.path.exists(_API_KEY_PATH):
-    with open(_API_KEY_PATH, "r", encoding="utf-8") as _f:
-        _API_KEY = _f.read().strip()
-
-if _API_KEY:
-    os.environ["GEMINI_API_KEY"] = _API_KEY
-    os.environ["GOOGLE_API_KEY"] = _API_KEY
-
-# ── Worker Config Factory ─────────────────────────────────────────────────────
-
-def make_worker_config(system_prompt: str) -> LocalAgentConfig:
-    """Build a LocalAgentConfig for the translation Worker from the show's system prompt."""
-    gemini_cfg = GeminiConfig(
-        api_key=_API_KEY if _API_KEY else None,
-        models=ModelConfig(
-            default=ModelEntry(
-                name="gemini-3.5-flash",
-                generation=GenerationConfig(thinking_level=ThinkingLevel.MINIMAL)
-            )
-        )
-    )
-    return LocalAgentConfig(
-        system_instructions=system_prompt,
-        policies=[policy.allow_all()],
-        workspaces=[],
-        gemini_config=gemini_cfg,
-    )
 
 # ── Usage Tracker ─────────────────────────────────────────────────────────────
 
@@ -190,16 +153,16 @@ async def translate_range(
     all_blocks: List[Dict[str, str]],
     start: int,
     end: int,
-    worker_cfg: LocalAgentConfig,
+    backend: TranslationBackend,
     usage: Dict[str, Any],
     episode_api_calls: List[int],
     attempt: int = 1,
     corrective: str = "",
 ) -> Optional[List[Dict[str, str]]]:
     """
-    Core recursive Worker translate range logic.
-    If the worker fails, mismatches counts, or gets rejected, we auto-split the range in half
-    and translate recursively, guaranteeing structural exactness.
+    Core recursive translate-range logic.
+    If the backend fails, mismatches counts, or gets rejected, we auto-split the
+    range in half and translate recursively, guaranteeing structural exactness.
     """
     block_count = end - start
     logging.info(
@@ -223,55 +186,60 @@ async def translate_range(
     prompt += "Translate the following SRT chunk from German to English:\n\n" + source_srt
 
     translated_raw = ""
-    api_error = False
+    api_error      = False
+
     try:
-        async with Agent(worker_cfg) as worker:
-            episode_api_calls[0] += 1
-            response = await asyncio.wait_for(worker.chat(prompt), timeout=WORKER_TIMEOUT)
-            translated_raw = await response.text()
+        episode_api_calls[0] += 1
+        text, chunk_usage = await asyncio.wait_for(
+            backend.translate(prompt), timeout=WORKER_TIMEOUT
+        )
 
-            # Clean output before validation to prevent false rejection spirals
-            translated_raw = strip_fences(translated_raw)
-            translated_raw = translated_raw.replace('**', '')
+        # Clean output before validation to prevent false rejection spirals
+        translated_raw = strip_fences(text)
+        translated_raw = translated_raw.replace('**', '')
 
-            # Record tokens and cost
-            usage_meta = response.usage_metadata
-            if usage_meta:
-                p_tokens   = usage_meta.prompt_token_count or 0
-                ca_tokens  = usage_meta.cached_content_token_count or 0
-                can_tokens = usage_meta.candidates_token_count or 0
-                th_tokens  = usage_meta.thoughts_token_count or 0
-                t_tokens   = usage_meta.total_token_count or 0
+        # Accumulate usage
+        usage['prompt_tokens']     += chunk_usage.prompt_tokens
+        usage['cached_tokens']     += chunk_usage.cached_tokens
+        usage['candidates_tokens'] += chunk_usage.output_tokens
+        usage['thoughts_tokens']   += chunk_usage.thoughts_tokens
+        usage['total_tokens']      += chunk_usage.total_tokens
+        usage['cost']              += chunk_usage.cost
 
-                non_cached_prompt = max(0, p_tokens - ca_tokens)
-                input_cost  = (non_cached_prompt / 1_000_000) * PRICE_PER_M_INPUT
-                cached_cost = (ca_tokens / 1_000_000) * PRICE_PER_M_CACHED
-                output_cost = ((can_tokens + th_tokens) / 1_000_000) * PRICE_PER_M_OUTPUT
-                chunk_cost  = input_cost + cached_cost + output_cost
+        logging.info(
+            "Range %d-%d usage: %d prompt (%d cached), %d candidates, %d thoughts. Est cost: $%.6f",
+            start, end,
+            chunk_usage.prompt_tokens, chunk_usage.cached_tokens,
+            chunk_usage.output_tokens, chunk_usage.thoughts_tokens,
+            chunk_usage.cost,
+        )
 
-                usage['prompt_tokens']     += p_tokens
-                usage['cached_tokens']     += ca_tokens
-                usage['candidates_tokens'] += can_tokens
-                usage['thoughts_tokens']   += th_tokens
-                usage['total_tokens']      += t_tokens
-                usage['cost']              += chunk_cost
-
-                logging.info(
-                    "Range %d-%d usage: %d prompt (%d cached), %d candidates, %d thoughts. Est cost: $%.6f",
-                    start, end, p_tokens, ca_tokens, can_tokens, th_tokens, chunk_cost,
-                )
     except asyncio.TimeoutError:
-        logging.warning("Worker call timed out after %ds for range %d-%d.", WORKER_TIMEOUT, start, end)
+        logging.warning("Backend call timed out after %ds for range %d-%d.", WORKER_TIMEOUT, start, end)
         api_error = True
-    except Exception as e:
-        msg = str(e).lower()
-        if any(x in msg for x in ("quota", "rate limit", "429", "resource exhausted", "too many requests")):
-            logging.error("Rate-limit/quota error for range %d-%d: %s. Aborting episode.", start, end, e)
-            return None
-        logging.warning("Worker API call failed: %s", e)
+    except RateLimitError as exc:
+        logging.error("Rate-limit/quota error for range %d-%d: %s. Aborting episode.", start, end, exc)
+        return None
+    except ContextLengthError:
+        # Context too long — split immediately, no point retrying
+        if block_count > MIN_CHUNK_SIZE:
+            mid = start + block_count // 2
+            logging.info(
+                "Context length error. Splitting range %d-%d into %d-%d and %d-%d",
+                start, end, start, mid, mid, end,
+            )
+            left = await translate_range(all_blocks, start, mid, backend, usage, episode_api_calls, attempt=1, corrective=corrective)
+            if left is None: return None
+            right = await translate_range(all_blocks, mid, end, backend, usage, episode_api_calls, attempt=1, corrective=corrective)
+            if right is None: return None
+            return left + right
+        logging.error("Context length error on single-block range %d-%d. Aborting.", start, end)
+        return None
+    except (TransientAPIError, Exception) as exc:
+        logging.warning("Backend API call failed: %s", exc)
         api_error = True
 
-    # Fallback / Split on Worker Failure
+    # Fallback / Split on Backend Failure
     if not translated_raw:
         if api_error:
             # Transport failure: retry with backoff only — never split into the quota storm
@@ -282,21 +250,21 @@ async def translate_range(
                     backoff, start, end, attempt + 1,
                 )
                 await asyncio.sleep(backoff)
-                return await translate_range(all_blocks, start, end, worker_cfg, usage, episode_api_calls, attempt + 1, corrective)
+                return await translate_range(all_blocks, start, end, backend, usage, episode_api_calls, attempt + 1, corrective)
             else:
                 logging.error("Transport error persists after %d attempts for range %d-%d. Aborting.", MAX_RETRIES, start, end)
                 return None
         else:
             # Content failure: retry then split
             if attempt < MAX_RETRIES:
-                logging.info("Worker failed (no output). Retrying range %d-%d, attempt %d", start, end, attempt + 1)
-                return await translate_range(all_blocks, start, end, worker_cfg, usage, episode_api_calls, attempt + 1, "Worker returned empty output.")
+                logging.info("Backend failed (no output). Retrying range %d-%d, attempt %d", start, end, attempt + 1)
+                return await translate_range(all_blocks, start, end, backend, usage, episode_api_calls, attempt + 1, "Backend returned empty output.")
             elif block_count > MIN_CHUNK_SIZE:
                 mid = start + block_count // 2
-                logging.info("Worker failed completely. Splitting range %d-%d into %d-%d and %d-%d", start, end, start, mid, mid, end)
-                left = await translate_range(all_blocks, start, mid, worker_cfg, usage, episode_api_calls, attempt=1, corrective=corrective)
+                logging.info("Backend failed completely. Splitting range %d-%d into %d-%d and %d-%d", start, end, start, mid, mid, end)
+                left = await translate_range(all_blocks, start, mid, backend, usage, episode_api_calls, attempt=1, corrective=corrective)
                 if left is None: return None
-                right = await translate_range(all_blocks, mid, end, worker_cfg, usage, episode_api_calls, attempt=1, corrective=corrective)
+                right = await translate_range(all_blocks, mid, end, backend, usage, episode_api_calls, attempt=1, corrective=corrective)
                 if right is None: return None
                 return left + right
             else:
@@ -308,16 +276,16 @@ async def translate_range(
         logging.warning("Programmatic validation failed for range %d-%d: %s", start, end, err_msg)
         if attempt < MAX_RETRIES:
             logging.info("Retrying range %d-%d, attempt %d", start, end, attempt + 1)
-            return await translate_range(all_blocks, start, end, worker_cfg, usage, episode_api_calls, attempt + 1, err_msg)
+            return await translate_range(all_blocks, start, end, backend, usage, episode_api_calls, attempt + 1, err_msg)
         elif block_count > MIN_CHUNK_SIZE:
             mid = start + block_count // 2
             logging.info(
                 "Splitting range %d-%d into %d-%d and %d-%d due to programmatic validation failure",
                 start, end, start, mid, mid, end,
             )
-            left = await translate_range(all_blocks, start, mid, worker_cfg, usage, episode_api_calls, attempt=1, corrective=err_msg)
+            left = await translate_range(all_blocks, start, mid, backend, usage, episode_api_calls, attempt=1, corrective=err_msg)
             if left is None: return None
-            right = await translate_range(all_blocks, mid, end, worker_cfg, usage, episode_api_calls, attempt=1, corrective=err_msg)
+            right = await translate_range(all_blocks, mid, end, backend, usage, episode_api_calls, attempt=1, corrective=err_msg)
             if right is None: return None
             return left + right
         else:
@@ -331,13 +299,14 @@ async def translate_range(
         b['text'] = wrap_subtitle_text(b['text'])
     return translated_blocks
 
-# ── Process Episode ───────────────────────────────────────────────────────────
+# ── Process Episode (Translation) ─────────────────────────────────────────────
 
 async def process_episode(
     episode_id: str,
     srt_path:   str,
     mkv_path:   str,
     cfg:        ShowConfig,
+    backend:    TranslationBackend,
     dry_run:    bool,
     force:      bool,
     usage:      Dict[str, Any],
@@ -414,10 +383,10 @@ async def process_episode(
     logging.info("Downloading source SRT to local path: %s", local_srt)
     download_file(srt_path, local_srt, cfg.media_host, cfg.media_user)
 
-    # Parse blocks with Sig/BOM normalization
+    # Parse blocks with BOM normalization
     with open(local_srt, "r", encoding="utf-8-sig") as f:
         srt_content = f.read()
-    all_blocks   = parse_srt(srt_content)
+    all_blocks    = parse_srt(srt_content)
     actual_blocks = len(all_blocks)
     logging.info("Parsed %d blocks locally.", actual_blocks)
 
@@ -433,10 +402,7 @@ async def process_episode(
         else:
             logging.info("Preserving existing state since its source_blocks matches actual_blocks (%d).", actual_blocks)
 
-    # Build Worker config once per episode from show's system prompt
-    worker_cfg = make_worker_config(cfg.system_prompt)
-
-    # Loop Chunks
+    # Chunk Loop
     n_chunks = len(state['chunks'])
     failed   = False
 
@@ -451,7 +417,7 @@ async def process_episode(
         logging.info("Chunk %d/%d: Blocks %d to %d (size %d)", i, n_chunks - 1, blk_start + 1, blk_end, blk_end - blk_start)
 
         translated_chunk_blocks = await translate_range(
-            all_blocks, blk_start, blk_end, worker_cfg, usage, episode_api_calls
+            all_blocks, blk_start, blk_end, backend, usage, episode_api_calls
         )
         if translated_chunk_blocks:
             chunk_out = chunk['output']
@@ -502,7 +468,7 @@ async def process_episode(
     save_state(episode_id, state, cfg.state_dir)
     logging.info("EPISODE COMPLETE: %s successfully deployed.", episode_id)
 
-    # Cleanup temp directory and persisted per-chunk outputs (final file already deployed)
+    # Cleanup
     shutil.rmtree(work_dir)
     for chunk in state['chunks']:
         try:
@@ -511,3 +477,100 @@ async def process_episode(
         except OSError as e:
             logging.warning("Could not remove chunk output %s: %s", chunk['output'], e)
     logging.info("Cleaned up temporary working directory and per-chunk outputs.")
+
+# ── Audio Extraction ──────────────────────────────────────────────────────────
+
+def extract_audio(mkv_path: str, wav_path: str) -> bool:
+    """Extract first audio stream from MKV as lossless PCM WAV. Returns True on success."""
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", mkv_path,
+         "-map", "0:a:0", "-acodec", "pcm_s16le", "-ar", "48000", "-f", "wav", wav_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logging.error("ffmpeg failed (exit %d):\n%s", result.returncode, result.stderr[-2000:])
+        return False
+    return True
+
+# ── Process Episode (Transcription) ───────────────────────────────────────────
+
+def transcribe_episode(
+    mkv_basename: str,
+    cfg:          ShowConfig,
+    backend:      TranscriptionBackend,
+) -> bool:
+    """Full transcription pipeline for one episode. Returns True if source-lang SRT was produced."""
+    sl         = cfg.source_lang
+    mkv_remote = f"{cfg.media_dir}/{mkv_basename}.mkv"
+    srt_remote = f"{cfg.media_dir}/{mkv_basename}.{sl}.srt"
+
+    # Skip if already done
+    check = run_ssh(f'test -f "{srt_remote}" && echo EXISTS || echo MISSING',
+                    cfg.media_host, cfg.media_user, check=False)
+    if check.returncode == 0 and "EXISTS" in check.stdout:
+        logging.info("SKIP %s — .%s.srt already exists", mkv_basename, sl)
+        return True
+
+    logging.info("=== START: %s ===", mkv_basename)
+    tmpdir    = tempfile.mkdtemp(prefix="subtitle-pipeline-aai-")
+    mkv_local = os.path.join(tmpdir, f"{mkv_basename}.mkv")
+    wav_local = os.path.join(tmpdir, f"{mkv_basename}.wav")
+    srt_local = os.path.join(tmpdir, f"{mkv_basename}.{sl}.srt")
+
+    try:
+        # 1. Download MKV from media server
+        logging.info("Downloading MKV from VM 113 …")
+        download_file(mkv_remote, mkv_local, cfg.media_host, cfg.media_user)
+
+        # 2. Extract audio
+        logging.info("Extracting audio …")
+        if not extract_audio(mkv_local, wav_local):
+            logging.error("Audio extraction failed for %s — skipping", mkv_basename)
+            return False
+
+        # Free MKV disk space before transcription upload
+        os.remove(mkv_local)
+
+        # 3. Transcribe via backend
+        logging.info("Submitting to AssemblyAI Universal-3 Pro …")
+        prompt = cfg.assemblyai_prompt.strip() or None
+        if prompt and prompt.startswith('#'):
+            prompt = None
+
+        try:
+            srt_text = with_retry(
+                "transcribe",
+                lambda: backend.transcribe(wav_local, cfg.source_lang, prompt),
+            )
+        except TranscriptionError as exc:
+            logging.error("Transcription returned error for %s: %s", mkv_basename, exc)
+            return False
+        except Exception as exc:
+            logging.error("Transcription returned no output for %s: %s", mkv_basename, exc)
+            return False
+
+        if not srt_text:
+            logging.error("Transcription returned no output for %s", mkv_basename)
+            return False
+
+        # 4. Write SRT locally, upload to media server
+        with open(srt_local, "w", encoding="utf-8") as fh:
+            fh.write(srt_text)
+
+        logging.info("Uploading .%s.srt to VM 113 …", sl)
+        upload_file(srt_local, srt_remote, cfg.media_host, cfg.media_user)
+
+        # 5. Verify
+        verify = run_ssh(f'ls -la "{srt_remote}"', cfg.media_host, cfg.media_user, check=False)
+        if verify.returncode != 0:
+            logging.error("Verification failed — .%s.srt not found on VM 113 after upload", sl)
+            return False
+        logging.info("Verified: %s", verify.stdout.strip())
+        logging.info("=== DONE: %s ===", mkv_basename)
+        return True
+
+    except Exception as exc:
+        logging.error("Unhandled error for %s: %s", mkv_basename, exc)
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
