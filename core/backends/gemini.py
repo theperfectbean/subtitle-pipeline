@@ -26,7 +26,7 @@ class GeminiTranslationBackend(TranslationBackend):
     """Gemini translation backend via google-genai SDK."""
 
     def __init__(self, api_key: str, system_prompt: str,
-                 model: str = "gemini-2.0-flash") -> None:
+                 model: str = "gemini-3.5-flash") -> None:
         self._client = genai.Client(api_key=api_key)
         self._model  = model
         self._config = types.GenerateContentConfig(

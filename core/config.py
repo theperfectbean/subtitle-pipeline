@@ -34,7 +34,7 @@ class ShowConfig:
     media_user:             str             = "admin"
     translation_backend:    str             = "gemini"
     transcription_backend:  str             = "assemblyai"
-    gemini_model:           str             = "gemini-2.0-flash"
+    gemini_model:           str             = "gemini-3.5-flash"
 
     # Derived at load time — not present in YAML
     show_slug:      str = ""
@@ -99,7 +99,7 @@ def load_show(path: str) -> ShowConfig:
         media_user             = raw.get('media_user', 'admin'),
         translation_backend    = raw.get('translation_backend', 'gemini'),
         transcription_backend  = raw.get('transcription_backend', 'assemblyai'),
-        gemini_model           = raw.get('gemini_model', 'gemini-2.0-flash'),
+        gemini_model           = raw.get('gemini_model', 'gemini-3.5-flash'),
         show_slug     = slug,
         state_dir     = state_dir,
         translate_log  = f"{log_base}-translate.log",
