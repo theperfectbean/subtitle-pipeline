@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 from .config import ShowConfig
-from .srt import parse_srt, render_blocks, wrap_subtitle_text, strip_fences, validate_translation_structure
+from .srt import parse_srt, render_blocks, sort_and_renumber, wrap_subtitle_text, strip_fences, validate_translation_structure
 from .transfer import run_ssh, download_file, upload_file, with_retry
 from .backends.base import (
     TranslationBackend, TranscriptionBackend,
@@ -396,11 +396,16 @@ async def process_episode(
             actual_blocks, source_blocks,
         )
         source_blocks = actual_blocks
-        if not state or state.get('source_blocks') != actual_blocks:
-            logging.info("Re-initializing state for %s since block count changed or state is missing.", episode_id)
-            state = init_state(episode_id, source_blocks, chunk_size, cfg.state_dir)
-        else:
-            logging.info("Preserving existing state since its source_blocks matches actual_blocks (%d).", actual_blocks)
+
+    # Always validate state consistency against the blocks we actually parsed.
+    # A stale state from a different SRT file (same episode ID, different block count)
+    # must be re-initialized to prevent out-of-bounds chunk slices.
+    if not state or state.get('source_blocks') != actual_blocks:
+        logging.info(
+            "State source_blocks (%s) doesn't match actual parsed blocks (%d). Re-initializing.",
+            state.get('source_blocks') if state else 'none', actual_blocks,
+        )
+        state = init_state(episode_id, actual_blocks, chunk_size, cfg.state_dir)
 
     # Chunk Loop
     n_chunks = len(state['chunks'])
@@ -444,9 +449,13 @@ async def process_episode(
             chunk_content = f.read()
         final_blocks.extend(parse_srt(chunk_content))
 
+    # Global sort + renumber: corrects any ordering anomalies from split/retry
+    final_blocks = sort_and_renumber(final_blocks)
+    logging.info("Applied global sort and renumber pass (%d blocks).", len(final_blocks))
+
     final_srt_local = os.path.join(work_dir, f"final.{tl}.srt")
     with open(final_srt_local, "w", encoding="utf-8") as f:
-        f.write(render_blocks(final_blocks, renumber=True))
+        f.write(render_blocks(final_blocks, renumber=False))  # seq already set by sort_and_renumber
 
     # Final Structural Validation
     final_count = len(final_blocks)

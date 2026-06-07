@@ -9,6 +9,8 @@ import re
 import textwrap
 from typing import Dict, List, Tuple
 
+_TS_START_RE = re.compile(r'^(\d{2}):(\d{2}):(\d{2}),(\d{1,3})')
+
 # ── SRT Parsing & Normalization ───────────────────────────────────────────────
 
 def parse_srt(content: str) -> List[Dict[str, str]]:
@@ -69,6 +71,27 @@ def wrap_subtitle_text(text: str, width: int = 45) -> str:
     return '\n'.join(wrapped_lines)
 
 
+def sort_and_renumber(blocks: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Sort blocks by start timestamp and renumber from 1.
+
+    Applied as a final global pass after all chunks are stitched so that any
+    out-of-order blocks produced by the split/retry logic are corrected before
+    the file is written to disk.
+    """
+    def _start_ms(block: Dict[str, str]) -> int:
+        m = _TS_START_RE.match(block.get('ts', ''))
+        if not m:
+            return 0
+        h, mm, s, ms_str = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        ms = int(ms_str.ljust(3, '0'))
+        return (h * 3600 + mm * 60 + s) * 1000 + ms
+
+    sorted_blocks = sorted(blocks, key=_start_ms)
+    for i, b in enumerate(sorted_blocks, 1):
+        b['seq'] = str(i)
+    return sorted_blocks
+
+
 def strip_fences(text: str) -> str:
     """Removes markdown code block fences and leading lines before block 1."""
     lines = text.splitlines()
@@ -115,7 +138,8 @@ def validate_translation_structure(raw_text: str, chunk_blocks: List[Dict[str, s
     reasoning_indicators = [
         "<thinking>", "</thinking>", "[thinking]", "(thinking)",
         "thinking:", "reasoning:", "my focus is on", "i'm now focused",
-        "i am now structuring", "i need to be careful", "api glitch", "token limit"
+        "i am now structuring", "i need to be careful", "api glitch", "token limit",
+        "(wait,", "(note:", "(correction:",
     ]
     for indicator in reasoning_indicators:
         if indicator in lower_raw:
