@@ -10,7 +10,9 @@ subtitle-pipeline/
 ├── translate.py              # translation CLI
 ├── transcribe.py             # transcription CLI
 ├── verify.py                 # quality-verification CLI (report only, no writes)
+├── upload.js                 # OpenSubtitles upload CLI
 ├── requirements.txt          # pip dependencies
+├── package.json              # Node.js dependencies (opensubtitles-api, js-yaml, dotenv)
 ├── .env.example              # credential template — copy to .env and fill in
 ├── core/
 │   ├── config.py             # ShowConfig dataclass + YAML loader
@@ -33,6 +35,7 @@ subtitle-pipeline/
 
 ```bash
 pip install -r requirements.txt
+npm install
 cp .env.example .env
 # edit .env and fill in your API keys
 ```
@@ -46,6 +49,8 @@ They are never stored in `ShowConfig` or YAML files.
 |---|---|---|
 | `GEMINI_API_KEY` | Gemini translation | https://aistudio.google.com/apikey |
 | `ASSEMBLYAI_API_KEY` | AssemblyAI transcription | https://www.assemblyai.com/dashboard |
+| `OS_USERNAME` | OpenSubtitles upload | https://www.opensubtitles.org |
+| `OS_PASSWORD` | OpenSubtitles upload | https://www.opensubtitles.org |
 
 ## YAML Schema
 
@@ -60,6 +65,7 @@ media_user: "admin"               # SSH user on the media server (default admin)
 translation_backend: "gemini"     # backend for translation (default "gemini")
 transcription_backend: "assemblyai" # backend for transcription (default "assemblyai")
 gemini_model: "gemini-2.0-flash"  # Gemini model override (default "gemini-2.0-flash")
+opensubtitles_imdb_id: "0000000"  # IMDB ID (without "tt" prefix) — required for upload.js
 
 system_prompt: |                  # required — translation system instructions
   ...
@@ -72,6 +78,7 @@ terminology: {}                   # optional — reserved for future use
 
 ## State & Logs
 
+
 - State:  `/home/admin/subtitle-pipeline-state/<show-slug>/`
 - Logs:   `/home/admin/logs/subtitle-pipeline-<show-slug>-translate.log`
           `/home/admin/logs/subtitle-pipeline-<show-slug>-transcribe.log`
@@ -80,6 +87,12 @@ terminology: {}                   # optional — reserved for future use
 ## Usage
 
 ```bash
+# Upload to OpenSubtitles
+node upload.js --show shows/your-show.yaml all
+node upload.js --show shows/your-show.yaml S02
+node upload.js --show shows/your-show.yaml S01E01
+node upload.js --show shows/your-show.yaml --dry-run all
+
 # Translation
 python3 translate.py --show shows/your-show.yaml all
 python3 translate.py --show shows/your-show.yaml S02

@@ -1,0 +1,25 @@
+{
+  "name": "subtitle-pipeline",
+  "version": "1.0.0",
+  "description": "Generalised subtitle translation and transcription pipeline for foreign-language media. Driven by per-show YAML configs; all logic lives in `core/`.",
+  "main": "upload.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theperfectbean/subtitle-pipeline.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/theperfectbean/subtitle-pipeline/issues"
+  },
+  "homepage": "https://github.com/theperfectbean/subtitle-pipeline#readme",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "js-yaml": "^4.2.0",
+    "opensubtitles-api": "^5.1.2"
+  }
+}
