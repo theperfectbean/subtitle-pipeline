@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 .env
 node_modules/
+node_modules/
