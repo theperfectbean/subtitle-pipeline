@@ -522,9 +522,10 @@ def transcribe_episode(
 
     logging.info("=== START: %s ===", mkv_basename)
     tmpdir    = tempfile.mkdtemp(prefix="subtitle-pipeline-aai-")
-    mkv_local = os.path.join(tmpdir, f"{mkv_basename}.mkv")
-    wav_local = os.path.join(tmpdir, f"{mkv_basename}.wav")
-    srt_local = os.path.join(tmpdir, f"{mkv_basename}.{sl}.srt")
+    _ep_name  = os.path.basename(mkv_basename)
+    mkv_local = os.path.join(tmpdir, f"{_ep_name}.mkv")
+    wav_local = os.path.join(tmpdir, f"{_ep_name}.wav")
+    srt_local = os.path.join(tmpdir, f"{_ep_name}.{sl}.srt")
 
     try:
         # 1. Download MKV from media server

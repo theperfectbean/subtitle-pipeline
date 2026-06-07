@@ -105,11 +105,11 @@ def main() -> None:
                 sys.exit(1)
 
         found_episodes += 1
-        basename = os.path.basename(mkv_path)
-        if basename.endswith('.mkv'):
-            basename = basename[:-4]
+        relative = os.path.relpath(mkv_path, cfg.media_dir)
+        if relative.endswith('.mkv'):
+            relative = relative[:-4]
 
-        ok = transcribe_episode(basename, cfg, backend)
+        ok = transcribe_episode(relative, cfg, backend)
         results[ep_id] = 'ok' if ok else 'FAILED'
 
     if found_episodes == 0:
