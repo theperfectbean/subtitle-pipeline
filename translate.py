@@ -96,7 +96,7 @@ async def main() -> None:
 
     # Find source SRT files on media server
     try:
-        res = run_ssh(f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}*.srt' | sort",
+        res = run_ssh(f"find '{cfg.media_dir}' -name '*.{cfg.source_lang}.srt' | sort",
                       cfg.media_host, cfg.media_user)
         srt_paths = [p.strip() for p in res.stdout.splitlines() if p.strip()]
     except Exception as e:

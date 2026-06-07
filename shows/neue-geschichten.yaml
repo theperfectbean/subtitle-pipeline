@@ -1,13 +1,72 @@
 name: "Neue Geschichten vom Pumuckl"
-media_dir: "/data/tv/Neue Geschichten vom Pumuckl"
+media_dir: "/data/tv/New stories from Pumuckl"
 source_lang: "de"
 target_lang: "en"
 chunk_size: 100
 media_host: "192.168.0.113"
 media_user: "admin"
 
+terminology:
+  "Kobold": "kobold"
+  "Werkstatt": "workshop"
+  "Schreiner": "carpenter"
+  "Herr Eder": "Herr Eder"
+  "Himmels willen": "heaven's sake"
+  "Himmelherrschaft": "heaven's dominion"
+  "Himmeldonner": "heaven's thunder"
+
 system_prompt: |
-  # TODO: Add translation system prompt for Neue Geschichten vom Pumuckl
+  You are translating German subtitles to English for the 2023 Austrian children's show "Neue Geschichten vom Pumuckl" (New Stories from Pumuckl).
+
+  STRICT OUTPUT FORMAT — VIOLATIONS WILL CAUSE IMMEDIATE REJECTION:
+  - Output ONLY valid SRT blocks. Nothing else — no preamble, no explanation, no markdown, no code fences.
+  - You are STRICTLY FORBIDDEN from including any reasoning, self-correction, or commentary in your output.
+  - NEVER output text like "(Wait...)", "(Note:...)", "(Actually...)", or any parenthetical corrections.
+  - NEVER revise a timestamp or sequence number mid-output. Emit each block exactly once, in order.
+  - You MUST output exactly the same number of blocks as the input — do not merge, split, or skip any blocks.
+  - Each block must preserve the EXACT sequence number and timestamp from the source, character-for-character.
+  - Output each block in this exact format: sequence number on its own line, timestamp on the next line, translated text after.
+
+  Translation rules — follow ALL of them exactly:
+  - Strip <font color=...> tags but keep the dialogue text inside them (no font tags in output).
+  - Preserve ♪ music symbols unchanged.
+  - Translate stage directions using asterisk format: * cheerful music *, * loud rumbling *, * laughs *, etc.
+  - "Kobold" must ALWAYS remain "kobold" (lowercase, untranslated) — this is the established usage in the official English subtitles for this show.
+  - "Herr Eder" must always remain "Herr Eder" — do not translate or alter.
+  - Preserve the character voices:
+    * Pumuckl must speak in playful rhymes, childlike exclamations, and mischievous energy. Preserve his voice and maintain rhyme where possible.
+    * Herr Eder must sound warm but flustered — he is a modern retiree, not an old-fashioned craftsman. Keep his speech plain and natural.
+  - Write natural, lively English suitable for a children's show — not stiff or literal.
+  - Maintain Phrasing Flow on Block Splits: German sentences are often split across multiple consecutive SRT blocks. When translating, you must split the English translation across those exact same blocks. However, carefully phrase the English so that each block is as grammatically self-contained, complete, and satisfying to read as possible when displayed. Avoid leaving incomplete fragments at the end of a block (e.g. do not end a block with a lone auxiliary verb, preposition, or split verb phrase like "has..."). Instead, distribute the words so the split occurs at a natural clause boundary, prepositional phrase, or logical pause.
+  - The theme song lyrics should be rendered in rhyming English in the spirit of the original.
+
+  Examples of desired tone:
+  Source:
+  3
+  00:00:02,700 --> 00:00:05,700
+  Pumuckl neckt, Pumuckl versteckt,
+  und keiner merkt was!
+
+  Target:
+  3
+  00:00:02,700 --> 00:00:05,700
+  Pumuckl teases, Pumuckl hides,
+  and nobody suspects a thing!
 
 assemblyai_prompt: |
-  # TODO: Add AssemblyAI transcription prompt for Neue Geschichten vom Pumuckl
+  This is a German audio track from "Neue Geschichten vom Pumuckl" (New Stories from Pumuckl), a 2023 Austrian children's television series. The audio is in standard German with some Bavarian/Austrian colouring.
+
+  Main characters:
+  - Pumuckl: an invisible kobold (sprite) with a high-pitched, childlike voice who speaks in rhymes and playful exclamations. His voice is performed at an unnaturally high pitch. He is mischievous and energetic.
+  - Herr Eder: a modern retired man who is warm but frequently flustered by Pumuckl's antics. He speaks in natural, conversational German.
+
+  Key proper nouns to transcribe accurately:
+  - Pumuckl (the kobold's name — always spelled this way)
+  - Kobold (means sprite or goblin — keep as-is)
+  - Herr Eder (the main human character — "Herr" is his title)
+  - Koboldschande (a compound word meaning "kobold's disgrace" — an important concept in the Pumuckl lore)
+
+  Audio characteristics:
+  - Pumuckl's voice is intentionally pitch-shifted and may be difficult to parse — transcribe what is intelligible and leave gaps for unintelligible sections rather than guessing
+  - There is a theme song at the start of each episode with sung lyrics featuring children's voices
+  - Stage directions and sound effects may be present as descriptive text in parentheses in the source subtitles

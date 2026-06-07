@@ -23,6 +23,13 @@ from core.config import load_show, ShowConfig
 from core.transfer import run_ssh, download_file
 from core.srt import parse_srt
 
+try:
+    import google.genai as genai
+    from google.genai import types
+except ImportError:
+    genai = None
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 TS_RE = re.compile(
@@ -137,6 +144,11 @@ def check_srt(content: str, lang: str) -> List[str]:
                     f"Block {b['seq']}: possible untranslated German ({count} indicators)"
                 )
 
+            # Check for untranslated stage directions
+            for sd in ['(lacht)', '(weint)', '(schreit)', '(titelmusik)', '(stöhnt)']:
+                if sd in padded:
+                    issues.append(f"Block {b['seq']}: untranslated stage direction {sd!r}")
+
         for tag in REASONING_TAGS:
             if tag.lower() in lower_text:
                 issues.append(f"Reasoning leakage detected: {tag!r}")
@@ -144,7 +156,112 @@ def check_srt(content: str, lang: str) -> List[str]:
         if '**' in full_text:
             issues.append("Bold markers (**) detected")
 
+        if '<font' in lower_text or '</font>' in lower_text:
+            issues.append("HTML font tags (<font>) detected in English output")
+
     return issues
+
+
+def check_translations(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowConfig) -> List[str]:
+    """Run cross-file side-by-side checks comparing German source to English target."""
+    issues: List[str] = []
+
+    if len(de_blocks) != len(en_blocks):
+        issues.append(f"Block count mismatch: German has {len(de_blocks)} blocks, English has {len(en_blocks)} blocks")
+        return issues
+
+    for i, (de_b, en_b) in enumerate(zip(de_blocks, en_blocks)):
+        seq = de_b['seq']
+        de_text = de_b['text']
+        en_text = en_b['text']
+
+        # 1. Music symbol preservation check
+        if '♪' in de_text and '♪' not in en_text:
+            issues.append(f"Block {seq}: Music symbol ♪ is in German source but missing in English translation")
+
+        # 2. Terminology consistency check (case-insensitive with a ±1 block window)
+        failed_targets = set()
+        for de_term, en_term in cfg.terminology.items():
+            de_clean = de_term.lower()
+
+            # Word boundary regex for German to avoid matching substrings (like Schreinerei for Schreiner)
+            pattern_de = r""
+            if de_clean[0].isalnum():
+                pattern_de += r"\b"
+            pattern_de += re.escape(de_clean)
+            if de_clean[-1].isalnum():
+                pattern_de += r"\b"
+
+            if re.search(pattern_de, de_text.lower()):
+                # Convert en_term to list of strings (synonyms)
+                if isinstance(en_term, list):
+                    en_options = [str(x).lower() for x in en_term]
+                else:
+                    en_options = [str(en_term).lower()]
+
+                # Check current, previous, and next blocks in English to allow natural block-boundary splits
+                found_en = False
+                for en_opt in en_options:
+                    # Word boundary regex for English option to ensure robust word matching
+                    pattern_en = r""
+                    if en_opt[0].isalnum():
+                        pattern_en += r"\b"
+                    pattern_en += re.escape(en_opt)
+                    if en_opt[-1].isalnum():
+                        pattern_en += r"\b"
+
+                    for offset in [-1, 0, 1]:
+                        idx = i + offset
+                        if 0 <= idx < len(en_blocks):
+                            if re.search(pattern_en, en_blocks[idx]['text'].lower()) or en_opt in en_blocks[idx]['text'].lower():
+                                found_en = True
+                                break
+                    if found_en:
+                        break
+
+                if not found_en:
+                    repr_options = ", ".join(f"'{opt}'" for opt in en_options)
+                    if repr_options not in failed_targets:
+                        issues.append(f"Block {seq}: German term {de_term!r} found, but English translation matching {repr_options} is missing")
+                        failed_targets.add(repr_options)
+
+    return issues
+
+
+
+def evaluate_with_llm(de_blocks: List[dict], en_blocks: List[dict], client) -> Tuple[str, str]:
+    """Sample blocks and evaluate stylistic quality using Gemini."""
+    if not de_blocks or not en_blocks:
+        return "SKIP", "No blocks to evaluate."
+    
+    # Sample up to 8 blocks evenly
+    step = max(1, len(de_blocks) // 8)
+    sample_indices = list(range(0, len(de_blocks), step))[:8]
+    
+    prompt = "Evaluate the following German to English subtitle translations for stylistic quality.\n\n"
+    prompt += "The source is 'Pumuckl', a Bavarian children's show. Pumuckl (a sprite) speaks playfully and in rhymes. Meister Eder speaks gruff, warm-hearted Bavarian.\n"
+    prompt += "Provide a rating of PASS or WARN on the first line, followed by a brief 1-2 sentence explanation of your reasoning focusing on tone, rhymes, and dialect translation.\n\n"
+    
+    for idx in sample_indices:
+        if idx < len(en_blocks):
+            prompt += f"Block {de_blocks[idx]['seq']}:\nDE: {de_blocks[idx]['text']}\nEN: {en_blocks[idx]['text']}\n\n"
+            
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=prompt,
+        )
+        text = response.text.strip()
+        lines = text.split('\n')
+        verdict = lines[0].strip()
+        if 'WARN' in verdict.upper():
+            verdict = 'WARN'
+        else:
+            verdict = 'PASS'
+        reasoning = ' '.join(lines[1:]).strip()
+        return verdict, reasoning
+    except Exception as e:
+        return "ERROR", f"LLM API failed: {e}"
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -166,6 +283,7 @@ def setup_logging(log_path: str) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Subtitle quality verification")
     p.add_argument('--show', required=True, help='Path to show YAML config')
+    p.add_argument('--llm-judge', action='store_true', help='Run LLM-as-a-judge on a sample of blocks')
     p.add_argument(
         'target', nargs='?', default='all',
         help='"all", "SxxExx" (e.g. S01E11), or "Sxx" (e.g. S01)',
@@ -178,6 +296,22 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg  = load_show(args.show)
+
+    llm_client = None
+    if getattr(args, 'llm_judge', False):
+        if not genai:
+            logging.critical("google-genai not installed. Cannot use --llm-judge.")
+            sys.exit(1)
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            from dotenv import load_dotenv
+            load_dotenv()
+            api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            logging.critical("GEMINI_API_KEY not found. Cannot use --llm-judge.")
+            sys.exit(1)
+        llm_client = genai.Client(api_key=api_key)
+
 
     verify_log = (
         f"/home/admin/logs/subtitle-pipeline-{cfg.show_slug}-verify.log"
@@ -247,46 +381,121 @@ def main() -> None:
                 f'.{cfg.source_lang}.srt', f'.{cfg.target_lang}.srt'
             )
 
-            # Fetch both files
+            # Local paths
             de_local = os.path.join(tmpdir, f"{ep_id}.{cfg.source_lang}.srt")
             en_local = os.path.join(tmpdir, f"{ep_id}.{cfg.target_lang}.srt")
 
             de_issues: List[str] = []
             en_issues: List[str] = []
 
-            for remote, local, lang, issue_list in [
-                (srt_path, de_local, cfg.source_lang, de_issues),
-                (en_path,  en_local, cfg.target_lang, en_issues),
-            ]:
-                exists = run_ssh(
-                    f'test -f "{remote}" && echo EXISTS || echo MISSING',
-                    cfg.media_host, cfg.media_user, check=False,
-                )
-                if 'EXISTS' not in exists.stdout:
-                    issue_list.append("File missing")
-                    logging.warning("%s [%s]: file not found on VM 113: %s", ep_id, lang, remote)
-                    continue
-
+            # 1. Download and parse English target file first
+            en_exists = run_ssh(
+                f'test -f "{en_path}" && echo EXISTS || echo MISSING',
+                cfg.media_host, cfg.media_user, check=False,
+            )
+            en_blocks = []
+            if 'EXISTS' not in en_exists.stdout:
+                en_issues.append("File missing")
+                logging.warning("%s [%s]: file not found on VM 113: %s", ep_id, cfg.target_lang, en_path)
+            else:
                 try:
-                    download_file(remote, local, cfg.media_host, cfg.media_user,
-                                  retries=2, backoff=5)
+                    download_file(en_path, en_local, cfg.media_host, cfg.media_user, retries=2, backoff=5)
+                    with open(en_local, 'r', encoding='utf-8', errors='replace') as f:
+                        en_content = f.read()
+                    if not en_content.strip():
+                        en_issues.append("File is empty")
+                    else:
+                        en_blocks = parse_srt(en_content)
+                        en_issues.extend(check_srt(en_content, cfg.target_lang))
                 except Exception as e:
-                    issue_list.append(f"Download failed: {e}")
-                    logging.error("%s [%s]: download failed: %s", ep_id, lang, e)
-                    continue
+                    en_issues.append(f"Download or read failed: {e}")
+                    logging.error("%s [%s]: download or read failed: %s", ep_id, cfg.target_lang, e)
 
+            # 2. Determine potential German source candidates and choose the closest block count
+            de_candidates = [srt_path]
+            for ext in [f'.{cfg.source_lang}.hi.srt', f'.{cfg.source_lang}.hi.synced.srt']:
+                cand = srt_path.replace(f'.{cfg.source_lang}.srt', ext)
+                if cand not in de_candidates:
+                    de_candidates.append(cand)
+
+            best_de_path = srt_path
+            best_cand_content = ""
+
+            if en_blocks:
+                best_diff = None
+                for remote_cand in de_candidates:
+                    exists = run_ssh(
+                        f'test -f "{remote_cand}" && echo EXISTS || echo MISSING',
+                        cfg.media_host, cfg.media_user, check=False,
+                    )
+                    if 'EXISTS' not in exists.stdout:
+                        continue
+
+                    cand_local = os.path.join(tmpdir, "temp_cand_de.srt")
+                    try:
+                        download_file(remote_cand, cand_local, cfg.media_host, cfg.media_user, retries=2, backoff=5)
+                        with open(cand_local, 'r', encoding='utf-8', errors='replace') as f:
+                            cand_content = f.read()
+                        cand_blocks = parse_srt(cand_content)
+                        diff = abs(len(cand_blocks) - len(en_blocks))
+                        if best_diff is None or diff < best_diff:
+                            best_diff = diff
+                            best_de_path = remote_cand
+                            best_cand_content = cand_content
+                        if os.path.exists(cand_local):
+                            os.remove(cand_local)
+                    except Exception:
+                        if os.path.exists(cand_local):
+                            try:
+                                os.remove(cand_local)
+                            except OSError:
+                                pass
+                        continue
+
+            if not best_cand_content:
+                # Fallback to default srt_path if English was missing or candidates download failed
+                best_de_path = srt_path
                 try:
-                    with open(local, 'r', encoding='utf-8', errors='replace') as f:
-                        content = f.read()
+                    download_file(srt_path, de_local, cfg.media_host, cfg.media_user, retries=2, backoff=5)
+                    with open(de_local, 'r', encoding='utf-8', errors='replace') as f:
+                        best_cand_content = f.read()
                 except Exception as e:
-                    issue_list.append(f"Read failed: {e}")
-                    continue
+                    de_issues.append(f"Download failed: {e}")
+                    logging.error("%s [%s]: download failed: %s", ep_id, cfg.source_lang, e)
 
-                if not content.strip():
-                    issue_list.append("File is empty")
-                    continue
+            if best_cand_content:
+                with open(de_local, 'w', encoding='utf-8') as f:
+                    f.write(best_cand_content)
+                if not best_cand_content.strip():
+                    de_issues.append("File is empty")
+                else:
+                    de_issues.extend(check_srt(best_cand_content, cfg.source_lang))
 
-                issue_list.extend(check_srt(content, lang))
+                if best_de_path != srt_path:
+                    logging.info("%s: Matched against better German candidate source: %s", ep_id, os.path.basename(best_de_path))
+
+            llm_verdict = None
+            llm_reasoning = None
+
+            # Run cross-file translations checks if single-file checks didn't find critical errors
+            if not de_issues and not en_issues:
+                try:
+                    with open(de_local, 'r', encoding='utf-8', errors='replace') as f:
+                        de_content = f.read()
+                    with open(en_local, 'r', encoding='utf-8', errors='replace') as f:
+                        en_content = f.read()
+
+                    de_blocks = parse_srt(de_content)
+                    en_blocks = parse_srt(en_content)
+
+                    trans_issues = check_translations(de_blocks, en_blocks, cfg)
+                    en_issues.extend(trans_issues)
+
+                    if llm_client:
+                        llm_verdict, llm_reasoning = evaluate_with_llm(de_blocks, en_blocks, llm_client)
+                        
+                except Exception as e:
+                    en_issues.append(f"Cross-translation verification failed: {e}")
 
             # Determine pass/fail
             ep_issues = (
@@ -315,6 +524,9 @@ def main() -> None:
                         print(f"  [{cfg.source_lang}] {issue}")
                 elif en_issues:
                     print(f"  [{cfg.source_lang}] No issues")
+
+            if llm_client and llm_verdict is not None:
+                print(f"  [LLM Judge] {llm_verdict}: {llm_reasoning}")
 
             print()
 

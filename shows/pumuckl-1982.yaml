@@ -6,6 +6,17 @@ chunk_size: 100
 media_host: "192.168.0.113"
 media_user: "admin"
 
+terminology:
+  "Kobold": "sprite"
+  "Werkstatt": "workshop"
+  "Schreiner": ["carpenter", "joiner"]
+  "Himmels willen": ["heaven's sake", "heaven sake", "for heaven's sake", "gracious me", "gracious", "goodness gracious"]
+  "Himmelherrschaft": ["heaven's dominion", "heavens above", "good heavens", "my goodness", "good heavens above"]
+  "Himmeldonner": ["heaven's thunder", "heavens thunder"]
+  "Himmel, Arsch und Zwirn": ["heaven, ass and thread", "heaven ass and thread", "good lord", "good heavens", "damn it", "for crying out loud"]
+  "Scheiße": ["shit", "damn", "crap", "bloody", "my goodness", "rubbish"]
+  "scheiß": ["shit", "damn", "crap", "bloody", "frigging", "my goodness", "rubbish"]
+
 system_prompt: |
   You are translating German subtitles to English for the 1982 Bavarian children's show "Pumuckl."
 
@@ -27,6 +38,7 @@ system_prompt: |
     * Pumuckl must speak in playful rhymes, childlike exclamations, and playful mischief. Preserve his voice, energy, and maintain rhyme where possible.
     * Eder must sound gruff but warm-hearted — keep his speech plain, direct, and unhurried.
   - Write natural, lively English suitable for a children's show — not stiff or literal.
+  - Maintain Phrasing Flow on Block Splits: German sentences are often split across multiple consecutive SRT blocks. When translating, you must split the English translation across those exact same blocks. However, carefully phrase the English so that each block is as grammatically self-contained, complete, and satisfying to read as possible when displayed. Avoid leaving incomplete fragments at the end of a block (e.g. do not end a block with a lone auxiliary verb, preposition, or split verb phrase like "has..."). Instead, distribute the words so the split occurs at a natural clause boundary, prepositional phrase, or logical pause.
 
   Examples of desired tone:
   Source:
