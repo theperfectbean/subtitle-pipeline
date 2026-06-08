@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -285,6 +286,65 @@ class ModelPolicyTests(unittest.TestCase):
             pipeline._target_srt_issues = original_target_srt_issues
             if work_dir:
                 shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_process_episode_does_not_resume_metadata_less_stale_state(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        source_content = _srt_text(11, "Neue deutsche Quelle", long_text=True)
+        translated_content = _srt_text(11, "Fresh English sentence")
+        backend = _FakeBackend("gemini", "gemini-test", [translated_content])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = os.path.join(tmpdir, "out")
+            state_dir = os.path.join(tmpdir, "state")
+            os.makedirs(output_dir)
+            os.makedirs(state_dir)
+            stale_chunk_path = os.path.join(state_dir, "S01E97_chunk_0_final.srt")
+            with open(stale_chunk_path, "w", encoding="utf-8") as fh:
+                fh.write(_srt_text(11, "Stale English sentence"))
+            with open(os.path.join(state_dir, "S01E97.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "episode": "S01E97",
+                        "source_blocks": 11,
+                        "chunk_size": 11,
+                        "chunks": [
+                            {
+                                "id": 0,
+                                "start": 0,
+                                "end": 11,
+                                "status": "done",
+                                "output": stale_chunk_path,
+                            }
+                        ],
+                        "status": "in_progress",
+                    },
+                    fh,
+                )
+
+            result = asyncio.run(
+                process_episode(
+                    "S01E97",
+                    "/remote/Sample.S01E97.de.srt",
+                    "/remote/Sample.S01E97.mkv",
+                    cfg,
+                    backend,
+                    None,
+                    dry_run=False,
+                    force=True,
+                    usage=make_usage_tracker(),
+                    deploy=False,
+                    output_dir=output_dir,
+                    state_dir=state_dir,
+                    source_content=source_content,
+                )
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(1, backend.calls)
+            with open(os.path.join(output_dir, "Sample.S01E97.en.srt"), "r", encoding="utf-8") as fh:
+                rendered = fh.read()
+            self.assertIn("Fresh English sentence", rendered)
+            self.assertNotIn("Stale English sentence", rendered)
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(

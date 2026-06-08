@@ -10,6 +10,7 @@ import os
 import json
 import logging
 import asyncio
+import hashlib
 import math
 import shutil
 import subprocess
@@ -194,7 +195,57 @@ def save_state(episode: str, state: Dict[str, Any], state_dir: str) -> None:
     os.replace(tmp_file, state_file)
 
 
-def init_state(episode: str, source_blocks: int, chunk_size: int, state_dir: str) -> Dict[str, Any]:
+def _stable_hash(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_state_metadata(
+    srt_content: str,
+    source_blocks: int,
+    chunk_size: int,
+    cfg: ShowConfig,
+    primary_backend: TranslationBackend,
+    escalation_backend: Optional[TranslationBackend],
+) -> Dict[str, Any]:
+    """Describe inputs that make cached chunk translations safe to reuse."""
+    return {
+        "version": 1,
+        "source_sha256": hashlib.sha256(srt_content.encode("utf-8")).hexdigest(),
+        "source_blocks": source_blocks,
+        "chunk_size": chunk_size,
+        "source_lang": cfg.source_lang,
+        "target_lang": cfg.target_lang,
+        "system_prompt_sha256": hashlib.sha256(cfg.system_prompt.encode("utf-8")).hexdigest(),
+        "terminology_sha256": _stable_hash(cfg.terminology),
+        "primary_backend": primary_backend.provider,
+        "primary_model": primary_backend.model,
+        "primary_thinking_level": cfg.gemini_thinking_level,
+        "escalation_backend": escalation_backend.provider if escalation_backend else "",
+        "escalation_model": escalation_backend.model if escalation_backend else "",
+        "escalation_thinking_level": cfg.escalation_thinking_level,
+    }
+
+
+def _state_metadata_mismatch(state: Dict[str, Any], expected_metadata: Dict[str, Any]) -> List[str]:
+    current_metadata = state.get("metadata")
+    if not isinstance(current_metadata, dict):
+        return ["missing_metadata"]
+
+    mismatches = []
+    for key, expected_value in expected_metadata.items():
+        if current_metadata.get(key) != expected_value:
+            mismatches.append(key)
+    return mismatches
+
+
+def init_state(
+    episode: str,
+    source_blocks: int,
+    chunk_size: int,
+    state_dir: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Create and persist fresh episode state with pending chunks."""
     n = math.ceil(source_blocks / chunk_size)
     chunks = []
@@ -218,6 +269,7 @@ def init_state(episode: str, source_blocks: int, chunk_size: int, state_dir: str
         'chunk_size':    chunk_size,
         'chunks':        chunks,
         'status':        'in_progress',
+        'metadata':      metadata or {},
     }
     save_state(episode, state, state_dir)
     return state
@@ -620,22 +672,39 @@ async def process_episode(
         chunk_size = cfg.chunk_size
         if source_blocks <= 60:
             chunk_size = source_blocks
+        expected_metadata = _build_state_metadata(
+            srt_content,
+            source_blocks,
+            chunk_size,
+            cfg,
+            primary_backend,
+            escalation_backend,
+        )
 
         state = load_state(episode_id, active_state_dir)
         if state:
-            all_pending = all(c.get('status') == 'pending' for c in state.get('chunks', []))
-            if all_pending and state.get('chunk_size') != chunk_size:
+            metadata_mismatches = _state_metadata_mismatch(state, expected_metadata)
+            if metadata_mismatches:
                 logging.info(
-                    "Existing state for %s is completely pending but has chunk_size %s. Re-initializing with new chunk_size %d.",
-                    episode_id, state.get('chunk_size'), chunk_size,
+                    "Existing state for %s is not safe to resume (%s). Re-initializing.",
+                    episode_id,
+                    ", ".join(metadata_mismatches),
                 )
-                state = init_state(episode_id, source_blocks, chunk_size, active_state_dir)
+                state = init_state(episode_id, source_blocks, chunk_size, active_state_dir, expected_metadata)
             else:
-                logging.info("Resuming existing state.")
-                state = resume_state(episode_id, active_state_dir)
+                all_pending = all(c.get('status') == 'pending' for c in state.get('chunks', []))
+                if all_pending and state.get('chunk_size') != chunk_size:
+                    logging.info(
+                        "Existing state for %s is completely pending but has chunk_size %s. Re-initializing with new chunk_size %d.",
+                        episode_id, state.get('chunk_size'), chunk_size,
+                    )
+                    state = init_state(episode_id, source_blocks, chunk_size, active_state_dir, expected_metadata)
+                else:
+                    logging.info("Resuming existing state.")
+                    state = resume_state(episode_id, active_state_dir)
         else:
             logging.info("Initializing fresh state.")
-            state = init_state(episode_id, source_blocks, chunk_size, active_state_dir)
+            state = init_state(episode_id, source_blocks, chunk_size, active_state_dir, expected_metadata)
 
         all_blocks = parse_srt(srt_content)
         for block in all_blocks:
@@ -649,13 +718,27 @@ async def process_episode(
                 actual_blocks, source_blocks,
             )
             source_blocks = actual_blocks
+            expected_metadata = _build_state_metadata(
+                srt_content,
+                source_blocks,
+                chunk_size,
+                cfg,
+                primary_backend,
+                escalation_backend,
+            )
 
         if not state or state.get('source_blocks') != actual_blocks:
             logging.info(
                 "State source_blocks (%s) doesn't match actual parsed blocks (%d). Re-initializing.",
                 state.get('source_blocks') if state else 'none', actual_blocks,
             )
-            state = init_state(episode_id, actual_blocks, chunk_size, active_state_dir)
+            state = init_state(episode_id, actual_blocks, chunk_size, active_state_dir, expected_metadata)
+        elif _state_metadata_mismatch(state, expected_metadata):
+            logging.info(
+                "State metadata for %s changed after parse normalization. Re-initializing.",
+                episode_id,
+            )
+            state = init_state(episode_id, actual_blocks, chunk_size, active_state_dir, expected_metadata)
 
         n_chunks = len(state['chunks'])
         failed = False
