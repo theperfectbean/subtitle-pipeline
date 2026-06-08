@@ -281,7 +281,7 @@ def _verify_local_translation(
     en_issues = check_srt(en_content, cfg.target_lang, cfg)
     issues.extend(f"[de] {issue}" for issue in de_issues)
     issues.extend(f"[en] {issue}" for issue in en_issues)
-    if not de_issues and not en_issues and de_blocks and en_blocks:
+    if de_blocks and en_blocks:
         issues.extend(f"[xlate] {issue}" for issue in check_translations(de_blocks, en_blocks, cfg))
     return issues
 
@@ -396,20 +396,34 @@ async def _run_bakeoff_candidate(
     stop_reason = ""
 
     for ep_id, srt_path, mkv_path in episodes:
-        result = await process_episode(
-            ep_id,
-            srt_path,
-            mkv_path,
-            candidate_cfg,
-            primary_backend,
-            escalation_backend,
-            dry_run=False,
-            force=force,
-            usage=candidate_usage,
-            deploy=False,
-            output_dir=str(outputs_dir),
-            state_dir=str(state_dir),
-        )
+        try:
+            result = await process_episode(
+                ep_id,
+                srt_path,
+                mkv_path,
+                candidate_cfg,
+                primary_backend,
+                escalation_backend,
+                dry_run=False,
+                force=force,
+                usage=candidate_usage,
+                deploy=False,
+                output_dir=str(outputs_dir),
+                state_dir=str(state_dir),
+                source_content=source_cache.get(srt_path),
+            )
+        except Exception as exc:
+            logging.exception("Bakeoff candidate %s failed on %s: %s", label, ep_id, exc)
+            candidate_rows.append({
+                "episode": ep_id,
+                "success": False,
+                "output_path": None,
+                "error": f"candidate_exception: {exc}",
+                "issues": [],
+                "issue_count": 0,
+            })
+            stop_reason = "candidate_exception"
+            break
         issues = []
         if result.get("success") and result.get("output_path"):
             issues = _verify_local_translation(
@@ -490,20 +504,16 @@ async def _run_bakeoff(
         target,
         max_episodes=bakeoff_max_episodes,
     )
-    episodes: List[Tuple[str, str, str]] = [
-        (ep_id, srt_path, _find_mkv_path(cfg, ep_id))
-        for ep_id, srt_path in selected_episodes
-    ]
 
-    if not episodes:
+    if not selected_episodes:
         logging.warning("No matching episodes found for bakeoff target=%s", target)
         return
 
-    mkv_map = _build_mkv_path_map(cfg, [ep_id for ep_id, _, _ in episodes])
-    episodes = [
-        (ep_id, srt_path, mkv_map.get(ep_id, mkv_path))
-        for ep_id, srt_path, mkv_path in episodes
-    ]
+    mkv_map = _build_mkv_path_map(cfg, [ep_id for ep_id, _ in selected_episodes])
+    episodes: List[Tuple[str, str, str]] = []
+    for ep_id, srt_path in selected_episodes:
+        mkv_path = mkv_map.get(ep_id) or _find_mkv_path(cfg, ep_id)
+        episodes.append((ep_id, srt_path, mkv_path))
 
     source_cache: Dict[str, str] = {}
     for ep_id, srt_path, _ in episodes:

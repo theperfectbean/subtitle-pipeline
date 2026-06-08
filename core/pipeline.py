@@ -503,6 +503,7 @@ async def process_episode(
     deploy:     bool = True,
     output_dir: Optional[str] = None,
     state_dir:  Optional[str] = None,
+    source_content: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Full translation pipeline for one episode."""
     episode_api_calls = [0]
@@ -547,182 +548,188 @@ async def process_episode(
         logging.info("SKIP: Local bakeoff output already exists at %s", out_srt_path)
         return {"success": True, "skipped": True, "output_path": out_srt_path, "episode_id": episode_id}
 
-    # Work Dir
     work_dir = tempfile.mkdtemp(prefix=f"subtitle-pipeline-{episode_id}-")
     logging.info("Created temporary working directory: %s", work_dir)
+    state: Dict[str, Any] = {}
+    preserve_work_dir = False
+    cleanup_chunk_outputs = False
+    try:
+        if source_content is None:
+            local_srt = os.path.join(work_dir, "source.srt")
+            logging.info("Downloading source SRT to local path: %s", local_srt)
+            download_file(srt_path, local_srt, cfg.media_host, cfg.media_user)
+            with open(local_srt, "r", encoding="utf-8-sig") as f:
+                srt_content = f.read()
+            file_size = os.path.getsize(local_srt)
+        else:
+            logging.info("Using prefetched source SRT content for %s.", episode_id)
+            srt_content = source_content.lstrip('\ufeff')
+            file_size = len(srt_content.encode("utf-8"))
 
-    # Download source once, then derive both preflight and parsing from the same local copy.
-    local_srt = os.path.join(work_dir, "source.srt")
-    logging.info("Downloading source SRT to local path: %s", local_srt)
-    download_file(srt_path, local_srt, cfg.media_host, cfg.media_user)
+        source_blocks = preflight_local_srt(srt_path, srt_content, file_size)
+        if source_blocks == 0:
+            logging.error("Episode %s skipped because pre-flight failed", episode_id)
+            return {"success": False, "error": "preflight_failed", "episode_id": episode_id}
 
-    with open(local_srt, "r", encoding="utf-8-sig") as f:
-        srt_content = f.read()
-    file_size = os.path.getsize(local_srt)
-    source_blocks = preflight_local_srt(srt_path, srt_content, file_size)
-    if source_blocks == 0:
-        logging.error("Episode %s skipped because pre-flight failed", episode_id)
-        shutil.rmtree(work_dir)
-        return {"success": False, "error": "preflight_failed", "episode_id": episode_id}
+        if dry_run:
+            logging.info("DRY RUN: Pre-flight checks passed successfully for %s with %d blocks.", episode_id, source_blocks)
+            return {"success": True, "skipped": True, "output_path": None, "episode_id": episode_id}
 
-    if dry_run:
-        logging.info("DRY RUN: Pre-flight checks passed successfully for %s with %d blocks.", episode_id, source_blocks)
-        shutil.rmtree(work_dir)
-        return {"success": True, "skipped": True, "output_path": None, "episode_id": episode_id}
+        chunk_size = cfg.chunk_size
+        if source_blocks <= 60:
+            chunk_size = source_blocks
 
-    # Episodes small enough to fit in a single API call don't benefit from chunking
-    chunk_size = cfg.chunk_size
-    if source_blocks <= 60:
-        chunk_size = source_blocks
-
-    # Resume or Init State
-    state = load_state(episode_id, active_state_dir)
-    if state:
-        all_pending = all(c.get('status') == 'pending' for c in state.get('chunks', []))
-        if all_pending and state.get('chunk_size') != chunk_size:
-            logging.info(
-                "Existing state for %s is completely pending but has chunk_size %s. Re-initializing with new chunk_size %d.",
-                episode_id, state.get('chunk_size'), chunk_size,
-            )
+        state = load_state(episode_id, active_state_dir)
+        if state:
+            all_pending = all(c.get('status') == 'pending' for c in state.get('chunks', []))
+            if all_pending and state.get('chunk_size') != chunk_size:
+                logging.info(
+                    "Existing state for %s is completely pending but has chunk_size %s. Re-initializing with new chunk_size %d.",
+                    episode_id, state.get('chunk_size'), chunk_size,
+                )
+                state = init_state(episode_id, source_blocks, chunk_size, active_state_dir)
+            else:
+                logging.info("Resuming existing state.")
+                state = resume_state(episode_id, active_state_dir)
+        else:
+            logging.info("Initializing fresh state.")
             state = init_state(episode_id, source_blocks, chunk_size, active_state_dir)
-        else:
-            logging.info("Resuming existing state.")
-            state = resume_state(episode_id, active_state_dir)
-    else:
-        logging.info("Initializing fresh state.")
-        state = init_state(episode_id, source_blocks, chunk_size, active_state_dir)
 
-    # Parse blocks with BOM normalization
-    all_blocks    = parse_srt(srt_content)
-    for block in all_blocks:
-        block['text'] = normalize_subtitle_text(block['text'])
-    actual_blocks = len(all_blocks)
-    logging.info("Parsed %d blocks locally.", actual_blocks)
+        all_blocks = parse_srt(srt_content)
+        for block in all_blocks:
+            block['text'] = normalize_subtitle_text(block['text'])
+        actual_blocks = len(all_blocks)
+        logging.info("Parsed %d blocks locally.", actual_blocks)
 
-    if actual_blocks != source_blocks:
-        logging.warning(
-            "Actual parsed blocks (%d) does not match preflight count (%d) — using parsed count.",
-            actual_blocks, source_blocks,
-        )
-        source_blocks = actual_blocks
-
-    # Always validate state consistency against the blocks we actually parsed.
-    # A stale state from a different SRT file (same episode ID, different block count)
-    # must be re-initialized to prevent out-of-bounds chunk slices.
-    if not state or state.get('source_blocks') != actual_blocks:
-        logging.info(
-            "State source_blocks (%s) doesn't match actual parsed blocks (%d). Re-initializing.",
-            state.get('source_blocks') if state else 'none', actual_blocks,
-        )
-        state = init_state(episode_id, actual_blocks, chunk_size, active_state_dir)
-
-    # Chunk Loop
-    n_chunks = len(state['chunks'])
-    failed   = False
-
-    for i in range(n_chunks):
-        chunk = state['chunks'][i]
-        if chunk['status'] == 'done':
-            logging.info("Chunk %d/%d: already completed (cached).", i, n_chunks - 1)
-            continue
-
-        blk_start = chunk['start']
-        blk_end   = chunk['end']
-        logging.info("Chunk %d/%d: Blocks %d to %d (size %d)", i, n_chunks - 1, blk_start + 1, blk_end, blk_end - blk_start)
-        start_with_escalation = _should_start_chunk_on_escalation(chunk, escalation_backend)
-        if start_with_escalation:
-            usage['direct_to_escalation_chunks'] += 1
-            logging.info(
-                "Chunk %d/%d: routing directly to escalation backend due to prior structural failure memory.",
-                i, n_chunks - 1,
+        if actual_blocks != source_blocks:
+            logging.warning(
+                "Actual parsed blocks (%d) does not match preflight count (%d) — using parsed count.",
+                actual_blocks, source_blocks,
             )
+            source_blocks = actual_blocks
 
-        translated_chunk_blocks = await translate_range(
-            all_blocks,
-            blk_start,
-            blk_end,
-            cfg,
-            primary_backend,
-            escalation_backend,
-            usage,
-            episode_api_calls,
-            chunk_state=chunk,
-            use_escalation=start_with_escalation,
-        )
-        if translated_chunk_blocks:
-            chunk_out = chunk['output']
-            with open(chunk_out, "w", encoding="utf-8") as f:
-                f.write(render_blocks(translated_chunk_blocks, renumber=True))
+        if not state or state.get('source_blocks') != actual_blocks:
+            logging.info(
+                "State source_blocks (%s) doesn't match actual parsed blocks (%d). Re-initializing.",
+                state.get('source_blocks') if state else 'none', actual_blocks,
+            )
+            state = init_state(episode_id, actual_blocks, chunk_size, active_state_dir)
 
-            chunk['status'] = 'done'
-            save_state(episode_id, state, active_state_dir)
-            logging.info("Chunk %d/%d: Completed and saved.", i, n_chunks - 1)
+        n_chunks = len(state['chunks'])
+        failed = False
+
+        for i in range(n_chunks):
+            chunk = state['chunks'][i]
+            if chunk['status'] == 'done':
+                logging.info("Chunk %d/%d: already completed (cached).", i, n_chunks - 1)
+                continue
+
+            blk_start = chunk['start']
+            blk_end = chunk['end']
+            logging.info("Chunk %d/%d: Blocks %d to %d (size %d)", i, n_chunks - 1, blk_start + 1, blk_end, blk_end - blk_start)
+            start_with_escalation = _should_start_chunk_on_escalation(chunk, escalation_backend)
+            if start_with_escalation:
+                usage['direct_to_escalation_chunks'] += 1
+                logging.info(
+                    "Chunk %d/%d: routing directly to escalation backend due to prior structural failure memory.",
+                    i, n_chunks - 1,
+                )
+
+            translated_chunk_blocks = await translate_range(
+                all_blocks,
+                blk_start,
+                blk_end,
+                cfg,
+                primary_backend,
+                escalation_backend,
+                usage,
+                episode_api_calls,
+                chunk_state=chunk,
+                use_escalation=start_with_escalation,
+            )
+            if translated_chunk_blocks:
+                chunk_out = chunk['output']
+                with open(chunk_out, "w", encoding="utf-8") as f:
+                    f.write(render_blocks(translated_chunk_blocks, renumber=True))
+
+                chunk['status'] = 'done'
+                save_state(episode_id, state, active_state_dir)
+                logging.info("Chunk %d/%d: Completed and saved.", i, n_chunks - 1)
+            else:
+                logging.error("Chunk %d: Failed unrecoverably! Aborting episode.", i)
+                save_state(episode_id, state, active_state_dir)
+                failed = True
+                break
+
+        if failed:
+            logging.error("Episode %s failed. State has been preserved.", episode_id)
+            return {"success": False, "error": "chunk_failed", "episode_id": episode_id, "output_path": None}
+
+        logging.info("Reassembling final SRT file.")
+        final_blocks = []
+        for chunk in state['chunks']:
+            with open(chunk['output'], "r", encoding="utf-8") as f:
+                chunk_content = f.read()
+            final_blocks.extend(parse_srt(chunk_content))
+
+        final_blocks = sort_and_renumber(final_blocks)
+        logging.info("Applied global sort and renumber pass (%d blocks).", len(final_blocks))
+
+        final_srt_local = os.path.join(work_dir, f"final.{tl}.srt")
+        with open(final_srt_local, "w", encoding="utf-8") as f:
+            f.write(render_blocks(final_blocks, renumber=False))
+
+        final_count = len(final_blocks)
+        if final_count != source_blocks:
+            preserve_work_dir = True
+            logging.error(
+                "FINAL VALIDATION FAIL: Final count (%d) != Source count (%d). Output retained in %s",
+                final_count, source_blocks, work_dir,
+            )
+            return {
+                "success": False,
+                "error": "final_validation_failed",
+                "episode_id": episode_id,
+                "output_path": None,
+                "work_dir": work_dir,
+            }
+
+        logging.info("FINAL VALIDATION SUCCESS: %d/%d blocks match perfectly.", final_count, source_blocks)
+
+        if deploy:
+            logging.info("Uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
+            upload_file(final_srt_local, out_srt_path, cfg.media_host, cfg.media_user)
         else:
-            logging.error("Chunk %d: Failed unrecoverably! Aborting episode.", i)
-            save_state(episode_id, state, active_state_dir)
-            failed = True
-            break
+            shutil.copy2(final_srt_local, out_srt_path)
+            logging.info("Wrote local bakeoff subtitle to %s", out_srt_path)
 
-    if failed:
-        logging.error("Episode %s failed. State has been preserved.", episode_id)
-        return {"success": False, "error": "chunk_failed", "episode_id": episode_id, "output_path": None}
+        state['status'] = 'complete'
+        save_state(episode_id, state, active_state_dir)
+        logging.info("EPISODE COMPLETE: %s successfully %s.", episode_id, "deployed" if deploy else "rendered locally")
+        cleanup_chunk_outputs = True
 
-    # Reassemble final file
-    logging.info("Reassembling final SRT file.")
-    final_blocks = []
-    for chunk in state['chunks']:
-        with open(chunk['output'], "r", encoding="utf-8") as f:
-            chunk_content = f.read()
-        final_blocks.extend(parse_srt(chunk_content))
-
-    # Global sort + renumber: corrects any ordering anomalies from split/retry
-    final_blocks = sort_and_renumber(final_blocks)
-    logging.info("Applied global sort and renumber pass (%d blocks).", len(final_blocks))
-
-    final_srt_local = os.path.join(work_dir, f"final.{tl}.srt")
-    with open(final_srt_local, "w", encoding="utf-8") as f:
-        f.write(render_blocks(final_blocks, renumber=False))  # seq already set by sort_and_renumber
-
-    # Final Structural Validation
-    final_count = len(final_blocks)
-    if final_count != source_blocks:
-        logging.error(
-            "FINAL VALIDATION FAIL: Final count (%d) != Source count (%d). Output retained in %s",
-            final_count, source_blocks, work_dir,
-        )
-        return {"success": False, "error": "final_validation_failed", "episode_id": episode_id, "output_path": None}
-
-    logging.info("FINAL VALIDATION SUCCESS: %d/%d blocks match perfectly.", final_count, source_blocks)
-
-    # Upload
-    if deploy:
-        logging.info("Uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
-        upload_file(final_srt_local, out_srt_path, cfg.media_host, cfg.media_user)
-    else:
-        shutil.copy2(final_srt_local, out_srt_path)
-        logging.info("Wrote local bakeoff subtitle to %s", out_srt_path)
-
-    # Complete State
-    state['status'] = 'complete'
-    save_state(episode_id, state, active_state_dir)
-    logging.info("EPISODE COMPLETE: %s successfully %s.", episode_id, "deployed" if deploy else "rendered locally")
-
-    # Cleanup
-    shutil.rmtree(work_dir)
-    for chunk in state['chunks']:
-        try:
-            if os.path.exists(chunk['output']):
-                os.remove(chunk['output'])
-        except OSError as e:
-            logging.warning("Could not remove chunk output %s: %s", chunk['output'], e)
-    logging.info("Cleaned up temporary working directory and per-chunk outputs.")
-    return {
-        "success": True,
-        "error": None,
-        "episode_id": episode_id,
-        "output_path": out_srt_path,
-        "api_calls": episode_api_calls[0],
-    }
+        return {
+            "success": True,
+            "error": None,
+            "episode_id": episode_id,
+            "output_path": out_srt_path,
+            "api_calls": episode_api_calls[0],
+        }
+    finally:
+        if not preserve_work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        if cleanup_chunk_outputs:
+            for chunk in state.get('chunks', []):
+                try:
+                    if os.path.exists(chunk['output']):
+                        os.remove(chunk['output'])
+                except OSError as e:
+                    logging.warning("Could not remove chunk output %s: %s", chunk['output'], e)
+        if not preserve_work_dir:
+            if cleanup_chunk_outputs:
+                logging.info("Cleaned up temporary working directory and per-chunk outputs.")
+            else:
+                logging.info("Cleaned up temporary working directory.")
 
 # ── Audio Extraction ──────────────────────────────────────────────────────────
 

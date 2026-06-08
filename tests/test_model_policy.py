@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from core.backends.base import TranslationBackend, TranslationUsage
 from core.backends.gemini import _thinking_config_for_model
@@ -21,6 +22,7 @@ from translate import (
     _build_mkv_path_map,
     _candidate_efficiency_metrics,
     _mark_recommendations,
+    _run_bakeoff_candidate,
     _select_bakeoff_episodes,
     _should_stop_bakeoff_candidate,
     _run_with_concurrency_limit,
@@ -127,7 +129,7 @@ class ModelPolicyTests(unittest.TestCase):
 
         self.assertTrue(all("Block count too low" in issue for issue in issues))
 
-    def test_verify_local_translation_skips_translation_checks_when_structural_checks_fail(self):
+    def test_verify_local_translation_still_runs_translation_checks_with_warnings(self):
         cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
         de_content = (
             "1\n"
@@ -146,11 +148,13 @@ class ModelPolicyTests(unittest.TestCase):
                 fh.write(en_content)
 
             original_check_translations = translate.check_translations
+            calls = []
 
-            def _should_not_run(*args, **kwargs):
-                raise AssertionError("check_translations should not be called when structural checks fail")
+            def _fake_check_translations(*args, **kwargs):
+                calls.append((args, kwargs))
+                return ["translation-level issue"]
 
-            translate.check_translations = _should_not_run
+            translate.check_translations = _fake_check_translations
             try:
                 issues = _verify_local_translation(
                     cfg,
@@ -162,6 +166,8 @@ class ModelPolicyTests(unittest.TestCase):
                 translate.check_translations = original_check_translations
 
         self.assertTrue(any("Block count too low" in issue for issue in issues))
+        self.assertIn("[xlate] translation-level issue", issues)
+        self.assertEqual(1, len(calls))
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(
@@ -310,6 +316,77 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(1.5, metrics["cost_per_clean_episode"])
         self.assertAlmostEqual(1.0, metrics["verifier_issues_per_episode"])
         self.assertAlmostEqual(2 / 3, metrics["clean_episode_rate"])
+
+    def test_run_bakeoff_candidate_passes_cached_source_content(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        original_make_backends = translate._make_backends
+        original_process_episode = translate.process_episode
+        original_verify = translate._verify_local_translation
+        calls = []
+
+        async def _fake_process_episode(*args, **kwargs):
+            calls.append(kwargs.get("source_content"))
+            return {
+                "success": True,
+                "output_path": "/tmp/out.en.srt",
+                "error": None,
+            }
+
+        translate._make_backends = lambda candidate_cfg: (_FakeBackend("gemini", "gemini-test", []), None)
+        translate.process_episode = _fake_process_episode
+        translate._verify_local_translation = lambda *args, **kwargs: []
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = asyncio.run(
+                    _run_bakeoff_candidate(
+                        cfg,
+                        [("S01E01", "/remote/S01E01.de.srt", "/remote/S01E01.mkv")],
+                        {"/remote/S01E01.de.srt": "cached source"},
+                        Path(tmpdir),
+                        "gemini",
+                        "gemini-test",
+                        force=True,
+                    )
+                )
+        finally:
+            translate._make_backends = original_make_backends
+            translate.process_episode = original_process_episode
+            translate._verify_local_translation = original_verify
+
+        self.assertEqual(["cached source"], calls)
+        self.assertTrue(result["structural_success"])
+
+    def test_run_bakeoff_candidate_records_candidate_exceptions(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        original_make_backends = translate._make_backends
+        original_process_episode = translate.process_episode
+
+        async def _fake_process_episode(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        translate._make_backends = lambda candidate_cfg: (_FakeBackend("gemini", "gemini-test", []), None)
+        translate.process_episode = _fake_process_episode
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = asyncio.run(
+                    _run_bakeoff_candidate(
+                        cfg,
+                        [("S01E01", "/remote/S01E01.de.srt", "/remote/S01E01.mkv")],
+                        {},
+                        Path(tmpdir),
+                        "gemini",
+                        "gemini-test",
+                        force=True,
+                    )
+                )
+        finally:
+            translate._make_backends = original_make_backends
+            translate.process_episode = original_process_episode
+
+        self.assertFalse(result["structural_success"])
+        self.assertTrue(result["stopped_early"])
+        self.assertEqual("candidate_exception", result["stop_reason"])
+        self.assertIn("candidate_exception", result["episodes"][0]["error"])
 
     def test_load_show_prefers_translation_model_and_defaults_judge_to_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
