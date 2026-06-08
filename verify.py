@@ -63,6 +63,7 @@ FILENAME_TYPO_PATTERNS = [
     (re.compile(r'hickup', re.IGNORECASE), "known English metadata typo: 'hickup'"),
     (re.compile(r'New Years Eve', re.IGNORECASE), "known English metadata typo: 'New Years Eve'"),
 ]
+SEQUENCE_RE = re.compile(r'^\d+$')
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -130,27 +131,73 @@ def check_source_warnings(blocks: List[dict], cfg: ShowConfig) -> List[str]:
     return issues
 
 
+def _normalize_srt_content(content: str) -> str:
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    return content.lstrip('\ufeff')
+
+
+def _raw_srt_issues(content: str, parsed_blocks: List[dict]) -> List[str]:
+    """Validate the raw SRT shape before tolerant parsing smooths over defects."""
+    issues: List[str] = []
+    normalized = _normalize_srt_content(content).strip('\n')
+    if not normalized:
+        return ["SRT content is empty"]
+
+    raw_blocks = [block for block in re.split(r'\n{2,}', normalized) if block.strip()]
+    if len(raw_blocks) != len(parsed_blocks):
+        issues.append(
+            f"Raw block structure mismatch: found {len(raw_blocks)} raw blocks, parsed {len(parsed_blocks)} blocks"
+        )
+
+    for index, raw_block in enumerate(raw_blocks, 1):
+        lines = raw_block.split('\n')
+        if len(lines) < 3:
+            issues.append(f"Raw block {index}: incomplete block structure")
+            continue
+        if not SEQUENCE_RE.match(lines[0].strip()):
+            issues.append(f"Raw block {index}: invalid sequence line {lines[0]!r}")
+        if '-->' not in lines[1]:
+            issues.append(f"Raw block {index}: invalid timestamp line {lines[1]!r}")
+        for extra_line in lines[2:]:
+            stripped = extra_line.strip()
+            if SEQUENCE_RE.match(stripped):
+                issues.append(f"Raw block {index}: embedded sequence line {extra_line!r}")
+            elif '-->' in stripped:
+                issues.append(f"Raw block {index}: embedded timestamp line {extra_line!r}")
+
+    return issues
+
+
 # ── Check function ────────────────────────────────────────────────────────────
 
 def check_srt(content: str, lang: str, cfg: Optional[ShowConfig] = None) -> List[str]:
     """Run all structural and content checks. Returns list of issue strings."""
     issues: List[str] = []
 
-    blocks = parse_srt(content)
+    normalized_content = _normalize_srt_content(content)
+    blocks = parse_srt(normalized_content)
+    issues.extend(_raw_srt_issues(normalized_content, blocks))
 
     # Block count
     if len(blocks) <= MIN_BLOCK_COUNT:
         issues.append(f"Block count too low: {len(blocks)} blocks")
 
-    # Duplicate sequence numbers
+    # Sequence checks
     seen: set = set()
+    expected_seq = 1
     for b in blocks:
         if b['seq'] in seen:
             issues.append(f"Block {b['seq']}: duplicate block number")
+        if not SEQUENCE_RE.match(b['seq']):
+            issues.append(f"Block {b['seq']}: non-numeric block number")
+        elif int(b['seq']) != expected_seq:
+            issues.append(f"Block {b['seq']}: expected sequence number {expected_seq}")
         seen.add(b['seq'])
+        expected_seq += 1
 
     # Per-block timestamp checks
     prev_start_ms = -1
+    prev_end_ms = -1
     for b in blocks:
         m = TS_RE.match(b['ts'])
         if not m:
@@ -159,6 +206,9 @@ def check_srt(content: str, lang: str, cfg: Optional[ShowConfig] = None) -> List
 
         start_ms = _ts_to_ms(m.group(1), m.group(2), m.group(3), m.group(4))
         end_ms   = _ts_to_ms(m.group(5), m.group(6), m.group(7), m.group(8))
+
+        if end_ms <= start_ms:
+            issues.append(f"Block {b['seq']}: non-positive duration timestamp range")
 
         duration_s = (end_ms - start_ms) / 1000
         if duration_s > MAX_BLOCK_DURATION_S:
@@ -170,11 +220,21 @@ def check_srt(content: str, lang: str, cfg: Optional[ShowConfig] = None) -> List
                 f"({_ms_to_hms(start_ms)} after {_ms_to_hms(prev_start_ms)})"
             )
 
+        if prev_end_ms >= 0 and start_ms < prev_end_ms:
+            issues.append(
+                f"Block {b['seq']}: overlaps previous subtitle "
+                f"({_ms_to_hms(start_ms)} starts before {_ms_to_hms(prev_end_ms)} ends)"
+            )
+
         prev_start_ms = start_ms
+        prev_end_ms = end_ms
 
     # Full-text content checks
     full_text  = '\n'.join(b['text'] for b in blocks)
     lower_text = full_text.lower()
+
+    if '\ufffd' in normalized_content:
+        issues.append("Unicode replacement character detected (possible decoding issue)")
 
     for artefact in ENCODING_ARTEFACTS:
         if artefact in full_text:

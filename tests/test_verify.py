@@ -155,6 +155,70 @@ class VerifyHelperTests(unittest.TestCase):
 
         self.assertFalse(any("Herr Eder" in issue for issue in issues))
 
+    def test_check_srt_reports_non_positive_duration(self):
+        content = (
+            "1\n"
+            "00:00:01,000 --> 00:00:01,000\n"
+            "Hello there.\n\n"
+        )
+
+        issues = check_srt(content, "en")
+
+        self.assertTrue(any("non-positive duration" in issue for issue in issues))
+
+    def test_check_srt_reports_overlapping_cues(self):
+        content = (
+            "1\n"
+            "00:00:01,000 --> 00:00:03,000\n"
+            "Hello there.\n\n"
+            "2\n"
+            "00:00:02,500 --> 00:00:04,000\n"
+            "General Kenobi.\n\n"
+        )
+
+        issues = check_srt(content, "en")
+
+        self.assertTrue(any("overlaps previous subtitle" in issue for issue in issues))
+
+    def test_check_srt_reports_non_monotonic_sequence_numbers(self):
+        content = (
+            "1\n"
+            "00:00:01,000 --> 00:00:02,000\n"
+            "Hello there.\n\n"
+            "3\n"
+            "00:00:03,000 --> 00:00:04,000\n"
+            "General Kenobi.\n\n"
+        )
+
+        issues = check_srt(content, "en")
+
+        self.assertTrue(any("expected sequence number 2" in issue for issue in issues))
+
+    def test_check_srt_reports_raw_block_structure_mismatch(self):
+        content = (
+            "1\n"
+            "00:00:01,000 --> 00:00:02,000\n"
+            "Hello there.\n"
+            "2\n"
+            "00:00:03,000 --> 00:00:04,000\n"
+            "General Kenobi.\n\n"
+        )
+
+        issues = check_srt(content, "en")
+
+        self.assertTrue(any("embedded sequence line" in issue for issue in issues))
+
+    def test_check_srt_reports_unicode_replacement_character(self):
+        content = (
+            "1\n"
+            "00:00:01,000 --> 00:00:02,000\n"
+            "Hello \ufffd there.\n\n"
+        )
+
+        issues = check_srt(content, "en")
+
+        self.assertTrue(any("Unicode replacement character" in issue for issue in issues))
+
 
 if __name__ == "__main__":
     unittest.main()
