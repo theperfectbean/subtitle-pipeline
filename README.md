@@ -22,8 +22,9 @@ subtitle-pipeline/
 │   └── backends/
 │       ├── base.py           # abstract base classes + custom exceptions
 │       ├── gemini.py         # Gemini translation (google-genai SDK)
-│       ├── assemblyai.py     # AssemblyAI transcription
-│       └── openai_stub.py    # documented stub for adding new backends
+│       ├── openai.py         # OpenAI translation backend
+│       ├── anthropic.py      # Anthropic translation backend
+│       └── assemblyai.py     # AssemblyAI transcription
 └── shows/
     └── your-show.yaml        # one YAML file per show
 ```
@@ -63,8 +64,10 @@ chunk_size: 100                   # blocks per API call (default 100)
 media_host: "192.168.0.113"       # SSH host of the media server (default 192.168.0.113)
 media_user: "admin"               # SSH user on the media server (default admin)
 translation_backend: "gemini"     # backend for translation (default "gemini")
+translation_model: "gemini-3.5-flash" # model for the primary translation backend
+escalation_backend: "gemini"       # optional backend for structural-failure escalation
+escalation_model: "gemini-3.1-pro-preview" # optional model for escalation
 transcription_backend: "assemblyai" # backend for transcription (default "assemblyai")
-gemini_model: "gemini-2.0-flash"  # Gemini model override (default "gemini-2.0-flash")
 opensubtitles_imdb_id: "0000000"  # IMDB ID (without "tt" prefix) — required for upload.js
 
 system_prompt: |                  # required — translation system instructions
@@ -101,6 +104,9 @@ python3 translate.py --show shows/your-show.yaml --dry-run S02E01
 python3 translate.py --show shows/your-show.yaml --force S02E01
 python3 translate.py --show shows/your-show.yaml --chunk-size 50 S02
 
+# Diagnostic model bakeoff. Use sparingly; production optimization belongs in the normal translation path.
+BAKEOFF_MAX_EPISODES=3 BAKEOFF_CONCURRENCY=2 python3 translate.py --show shows/your-show.yaml --bakeoff S02
+
 # Transcription
 python3 transcribe.py --show shows/your-show.yaml all
 python3 transcribe.py --show shows/your-show.yaml S02E01
@@ -112,6 +118,15 @@ python3 transcribe.py --show shows/your-show.yaml S02E01
 |-----|--------|
 | `DRY_RUN=1` | Same as `--dry-run` |
 | `FORCE=1`   | Same as `--force` |
+| `BAKEOFF_MAX_EPISODES=N` | Diagnostic bakeoff only: cap selected episodes |
+| `BAKEOFF_CONCURRENCY=N` | Diagnostic bakeoff only: cap concurrent candidates |
+| `BAKEOFF_MAX_VERIFIER_ISSUES=N` | Diagnostic bakeoff only: stop a candidate once verifier issues exceed N |
+
+## Production Focus
+
+`--bakeoff` is a diagnostic harness for periodic model selection and regression checks. It is not the production translation path.
+
+The primary production path is `translate.py` without `--bakeoff`: source discovery, skip/force handling, chunk translation, structural validation, retry/escalation, resume state, final validation, and upload. Future optimization work should prioritize that path unless the task is explicitly about model comparison.
 
 ## Verification
 
