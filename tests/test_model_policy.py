@@ -1,9 +1,11 @@
 import asyncio
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+import core.pipeline as pipeline
 from core.backends.base import TranslationBackend, TranslationUsage
 from core.backends.gemini import _thinking_config_for_model
 from core.backends.openai import OpenAITranslationBackend
@@ -14,7 +16,9 @@ from core.pipeline import (
     _should_immediately_escalate_structural_failure,
     _should_start_chunk_on_escalation,
     _should_retry_then_escalate_structural_failure,
+    _verify_existing_target_srt,
     make_usage_tracker,
+    process_episode,
     translate_range,
 )
 import translate
@@ -54,6 +58,22 @@ class _FakeBackend(TranslationBackend):
         self.calls += 1
         text = self._outputs.pop(0)
         return text, TranslationUsage()
+
+
+def _srt_text(block_count, text_prefix="Translated line", long_text=False):
+    blocks = []
+    for i in range(1, block_count + 1):
+        start = i
+        end = i + 1
+        text = f"{text_prefix} {i}."
+        if long_text:
+            text += " " + ("This sentence keeps the source subtitle comfortably above preflight size. " * 8)
+        blocks.append(
+            f"{i}\n"
+            f"00:00:{start:02d},000 --> 00:00:{end:02d},000\n"
+            f"{text}\n"
+        )
+    return "\n".join(blocks) + "\n"
 
 
 class ModelPolicyTests(unittest.TestCase):
@@ -168,6 +188,103 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertTrue(any("Block count too low" in issue for issue in issues))
         self.assertIn("[xlate] translation-level issue", issues)
         self.assertEqual(1, len(calls))
+
+    def test_verify_existing_target_srt_checks_local_output(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            valid_path = os.path.join(tmpdir, "valid.en.srt")
+            invalid_path = os.path.join(tmpdir, "invalid.en.srt")
+            with open(valid_path, "w", encoding="utf-8") as fh:
+                fh.write(_srt_text(11, "Clean English sentence"))
+            with open(invalid_path, "w", encoding="utf-8") as fh:
+                fh.write(_srt_text(11, "Bad<br/>markup"))
+
+            self.assertEqual([], _verify_existing_target_srt(valid_path, cfg, deploy=False))
+            self.assertTrue(_verify_existing_target_srt(invalid_path, cfg, deploy=False))
+
+    def test_process_episode_regenerates_invalid_existing_local_output(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        source_content = _srt_text(11, "Deutsche Quelle", long_text=True)
+        translated_content = _srt_text(11, "Clean English sentence")
+        backend = _FakeBackend("gemini", "gemini-test", [translated_content])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = os.path.join(tmpdir, "out")
+            state_dir = os.path.join(tmpdir, "state")
+            os.makedirs(output_dir)
+            os.makedirs(state_dir)
+            output_path = os.path.join(output_dir, "Sample.S01E99.en.srt")
+            with open(output_path, "w", encoding="utf-8") as fh:
+                fh.write(_srt_text(11, "Bad<br/>markup"))
+
+            result = asyncio.run(
+                process_episode(
+                    "S01E99",
+                    "/remote/Sample.S01E99.de.srt",
+                    "/remote/Sample.S01E99.mkv",
+                    cfg,
+                    backend,
+                    None,
+                    dry_run=False,
+                    force=False,
+                    usage=make_usage_tracker(),
+                    deploy=False,
+                    output_dir=output_dir,
+                    state_dir=state_dir,
+                    source_content=source_content,
+                )
+            )
+
+            self.assertTrue(result["success"])
+            self.assertFalse(result.get("skipped", False))
+            self.assertEqual(1, backend.calls)
+            with open(output_path, "r", encoding="utf-8") as fh:
+                self.assertNotIn("<br/>", fh.read())
+
+    def test_process_episode_blocks_final_output_when_target_verifier_fails(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        source_content = _srt_text(11, "Deutsche Quelle", long_text=True)
+        translated_content = _srt_text(11, "Clean English sentence")
+        backend = _FakeBackend("gemini", "gemini-test", [translated_content])
+        original_target_srt_issues = pipeline._target_srt_issues
+
+        pipeline._target_srt_issues = lambda content, cfg: ["forced final verification issue"]
+        work_dir = None
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_dir = os.path.join(tmpdir, "out")
+                state_dir = os.path.join(tmpdir, "state")
+                os.makedirs(output_dir)
+                os.makedirs(state_dir)
+
+                result = asyncio.run(
+                    process_episode(
+                        "S01E98",
+                        "/remote/Sample.S01E98.de.srt",
+                        "/remote/Sample.S01E98.mkv",
+                        cfg,
+                        backend,
+                        None,
+                        dry_run=False,
+                        force=True,
+                        usage=make_usage_tracker(),
+                        deploy=False,
+                        output_dir=output_dir,
+                        state_dir=state_dir,
+                        source_content=source_content,
+                    )
+                )
+                work_dir = result.get("work_dir")
+                self.assertFalse(result["success"])
+                self.assertEqual("final_target_verification_failed", result["error"])
+                self.assertEqual(["forced final verification issue"], result["issues"])
+                self.assertFalse(os.path.exists(os.path.join(output_dir, "Sample.S01E98.en.srt")))
+                self.assertTrue(work_dir and os.path.isdir(work_dir))
+        finally:
+            pipeline._target_srt_issues = original_target_srt_issues
+            if work_dir:
+                shutil.rmtree(work_dir, ignore_errors=True)
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(

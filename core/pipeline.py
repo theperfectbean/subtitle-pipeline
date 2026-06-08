@@ -258,6 +258,34 @@ def preflight_local_srt(srt_path: str, srt_content: str, file_size: int) -> int:
     logging.info("Pre-flight SUCCESS: %d blocks, %d bytes", block_count, file_size)
     return block_count
 
+
+def _target_srt_issues(content: str, cfg: ShowConfig) -> List[str]:
+    """Run target-side structural/content checks without importing verify at module load."""
+    from verify import check_srt
+
+    return check_srt(content, cfg.target_lang, cfg)
+
+
+def _verify_existing_target_srt(out_srt_path: str, cfg: ShowConfig, deploy: bool) -> List[str]:
+    """Return target-side issues for an existing output subtitle, or an access issue."""
+    if deploy:
+        tmpdir = tempfile.mkdtemp(prefix="subtitle-pipeline-existing-")
+        local_path = os.path.join(tmpdir, "existing.srt")
+        try:
+            download_file(out_srt_path, local_path, cfg.media_host, cfg.media_user)
+            with open(local_path, "r", encoding="utf-8-sig") as f:
+                return _target_srt_issues(f.read(), cfg)
+        except Exception as exc:
+            return [f"Could not verify existing output: {exc}"]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        with open(out_srt_path, "r", encoding="utf-8-sig") as f:
+            return _target_srt_issues(f.read(), cfg)
+    except Exception as exc:
+        return [f"Could not verify existing output: {exc}"]
+
 # ── Translation Core ──────────────────────────────────────────────────────────
 
 async def translate_range(
@@ -540,13 +568,27 @@ async def process_episode(
         try:
             res = run_ssh(f"test -f '{out_srt_path}'", cfg.media_host, cfg.media_user, check=False)
             if res.returncode == 0:
-                logging.info("SKIP: Output subtitle already exists at %s", out_srt_path)
-                return {"success": True, "skipped": True, "output_path": out_srt_path, "episode_id": episode_id}
+                existing_issues = _verify_existing_target_srt(out_srt_path, cfg, deploy=True)
+                if not existing_issues:
+                    logging.info("SKIP: Verified output subtitle already exists at %s", out_srt_path)
+                    return {"success": True, "skipped": True, "output_path": out_srt_path, "episode_id": episode_id}
+                logging.warning(
+                    "Existing output subtitle at %s failed verification; regenerating. Issues: %s",
+                    out_srt_path,
+                    "; ".join(existing_issues),
+                )
         except Exception:
             pass
     elif not deploy and not force and os.path.exists(out_srt_path):
-        logging.info("SKIP: Local bakeoff output already exists at %s", out_srt_path)
-        return {"success": True, "skipped": True, "output_path": out_srt_path, "episode_id": episode_id}
+        existing_issues = _verify_existing_target_srt(out_srt_path, cfg, deploy=False)
+        if not existing_issues:
+            logging.info("SKIP: Verified local output already exists at %s", out_srt_path)
+            return {"success": True, "skipped": True, "output_path": out_srt_path, "episode_id": episode_id}
+        logging.warning(
+            "Existing local output at %s failed verification; regenerating. Issues: %s",
+            out_srt_path,
+            "; ".join(existing_issues),
+        )
 
     work_dir = tempfile.mkdtemp(prefix=f"subtitle-pipeline-{episode_id}-")
     logging.info("Created temporary working directory: %s", work_dir)
@@ -695,6 +737,25 @@ async def process_episode(
             }
 
         logging.info("FINAL VALIDATION SUCCESS: %d/%d blocks match perfectly.", final_count, source_blocks)
+        with open(final_srt_local, "r", encoding="utf-8-sig") as f:
+            final_target_issues = _target_srt_issues(f.read(), cfg)
+        if final_target_issues:
+            preserve_work_dir = True
+            logging.error(
+                "FINAL TARGET VERIFICATION FAIL: %d issue(s). Output retained in %s. Issues: %s",
+                len(final_target_issues),
+                work_dir,
+                "; ".join(final_target_issues),
+            )
+            return {
+                "success": False,
+                "error": "final_target_verification_failed",
+                "episode_id": episode_id,
+                "output_path": None,
+                "issues": final_target_issues,
+                "work_dir": work_dir,
+            }
+        logging.info("FINAL TARGET VERIFICATION SUCCESS: no target-side issues detected.")
 
         if deploy:
             logging.info("Uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
