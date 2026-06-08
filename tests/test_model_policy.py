@@ -32,6 +32,7 @@ from translate import (
     _mark_recommendations,
     _run_bakeoff_candidate,
     _select_bakeoff_episodes,
+    _merge_usage_totals,
     _should_stop_bakeoff_candidate,
     _run_with_concurrency_limit,
     _resolve_concurrency,
@@ -486,6 +487,23 @@ class ModelPolicyTests(unittest.TestCase):
                 os.environ.pop("TRANSLATE_CONCURRENCY", None)
             else:
                 os.environ["TRANSLATE_CONCURRENCY"] = original_value
+
+    def test_merge_usage_totals_accumulates_failure_classes(self):
+        target = make_usage_tracker()
+        source = make_usage_tracker()
+        source["prompt_tokens"] = 10
+        source["cached_tokens"] = 2
+        source["cost"] = 1.25
+        source["retry_count"] = 3
+        source["failure_classes"] = {"markup": 2, "block_count": 1}
+
+        _merge_usage_totals(target, source)
+
+        self.assertEqual(10, target["prompt_tokens"])
+        self.assertEqual(2, target["cached_tokens"])
+        self.assertEqual(1.25, target["cost"])
+        self.assertEqual(3, target["retry_count"])
+        self.assertEqual({"markup": 2, "block_count": 1}, target["failure_classes"])
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(

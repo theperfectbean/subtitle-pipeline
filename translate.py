@@ -364,6 +364,32 @@ def _resolve_concurrency(cli_value: Optional[int]) -> int:
     return max(1, int(raw_value))
 
 
+def _merge_usage_totals(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    for key in (
+        "prompt_tokens",
+        "cached_tokens",
+        "candidates_tokens",
+        "thoughts_tokens",
+        "total_tokens",
+        "cost",
+        "retry_count",
+        "split_count",
+        "escalation_count",
+        "api_calls",
+        "structural_failures",
+        "primary_structural_failures",
+        "escalated_chunk_successes",
+        "direct_to_escalation_chunks",
+    ):
+        target[key] += source.get(key, 0)
+
+    failure_classes = source.get("failure_classes") or {}
+    if failure_classes:
+        target_failure_classes = target.setdefault("failure_classes", {})
+        for failure_class, count in failure_classes.items():
+            target_failure_classes[failure_class] = target_failure_classes.get(failure_class, 0) + count
+
+
 async def _run_bakeoff_candidate(
     cfg: ShowConfig,
     episodes: List[Tuple[str, str, str]],
@@ -653,11 +679,7 @@ async def main() -> None:
         logging.info("=== Run complete ===")
         return
 
-    # Build translation backend once per run
-    backend, escalation_backend = _make_backends(cfg)
     mkv_map = _build_mkv_path_map(cfg, matching_episode_ids) if not dry_run else {}
-
-    usage = make_usage_tracker()
     matching_episodes = []
     for srt_path in srt_paths:
         ep_match = re.search(r'S\d{2}E\d{2}', srt_path)
@@ -672,19 +694,40 @@ async def main() -> None:
 
     found_episodes = len(matching_episode_ids)
     if not dry_run and matching_episodes:
-        async def _process_one(ep_id: str, srt_path: str, mkv_path: str) -> None:
+        async def _process_one(ep_id: str, srt_path: str, mkv_path: str) -> Dict[str, Any]:
+            episode_usage = make_usage_tracker()
             try:
-                await process_episode(
+                backend, escalation_backend = _make_backends(cfg)
+                result = await process_episode(
                     ep_id, srt_path, mkv_path, cfg, backend, escalation_backend,
-                    dry_run=False, force=force, usage=usage,
+                    dry_run=False, force=force, usage=episode_usage,
                 )
+                return {
+                    "episode_id": ep_id,
+                    "result": result,
+                    "usage": episode_usage,
+                }
             except Exception as e:
                 logging.exception("Exception raised while processing %s: %s", ep_id, e)
+                return {
+                    "episode_id": ep_id,
+                    "result": None,
+                    "usage": episode_usage,
+                }
 
-        await _run_with_concurrency_limit(
+        episode_results = await _run_with_concurrency_limit(
             concurrency,
             [_process_one(ep_id, srt_path, mkv_path) for ep_id, srt_path, mkv_path in matching_episodes],
         )
+
+        usage = make_usage_tracker()
+        for episode_result in episode_results:
+            if not episode_result:
+                continue
+            _merge_usage_totals(usage, episode_result.get("usage") or {})
+
+    else:
+        usage = make_usage_tracker()
 
     if found_episodes == 0:
         logging.warning("No matching episodes found (target=%s)", target)
