@@ -375,6 +375,50 @@ def _upload_file_atomic(local_path: str, remote_path: str, cfg: ShowConfig) -> N
         except Exception as exc:
             logging.warning("Could not remove remote temp subtitle %s: %s", remote_tmp, exc)
 
+
+def _sha256_file(local_path: str) -> str:
+    digest = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_deployed_target_srt(local_path: str, remote_path: str, cfg: ShowConfig) -> List[str]:
+    """Confirm the deployed file matches the verified local output."""
+    local_size = os.path.getsize(local_path)
+    local_hash = _sha256_file(local_path)
+
+    remote_size = run_ssh(
+        f"stat -c %s {shlex.quote(remote_path)}",
+        cfg.media_host,
+        cfg.media_user,
+        check=False,
+    )
+    if remote_size.returncode != 0:
+        return [f"Could not stat deployed output: {remote_size.stderr.strip() or remote_size.stdout.strip() or 'unknown error'}"]
+
+    remote_size_text = remote_size.stdout.strip()
+    if not remote_size_text.isdigit():
+        return [f"Unexpected deployed size output: {remote_size_text!r}"]
+    if int(remote_size_text) != local_size:
+        return [f"Deployed size mismatch: local {local_size} bytes, remote {remote_size_text} bytes"]
+
+    remote_hash = run_ssh(
+        f"sha256sum {shlex.quote(remote_path)} | awk '{{print $1}}'",
+        cfg.media_host,
+        cfg.media_user,
+        check=False,
+    )
+    if remote_hash.returncode != 0:
+        return [f"Could not hash deployed output: {remote_hash.stderr.strip() or remote_hash.stdout.strip() or 'unknown error'}"]
+
+    remote_hash_text = remote_hash.stdout.strip()
+    if remote_hash_text != local_hash:
+        return [f"Deployed hash mismatch: local {local_hash}, remote {remote_hash_text}"]
+
+    return []
+
 # ── Translation Core ──────────────────────────────────────────────────────────
 
 async def translate_range(
@@ -880,6 +924,24 @@ async def process_episode(
         if deploy:
             logging.info("Atomically uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
             _upload_file_atomic(final_srt_local, out_srt_path, cfg)
+            deploy_issues = _verify_deployed_target_srt(final_srt_local, out_srt_path, cfg)
+            if deploy_issues:
+                preserve_work_dir = True
+                logging.error(
+                    "DEPLOY VERIFICATION FAIL: %d issue(s). Output retained in %s. Issues: %s",
+                    len(deploy_issues),
+                    work_dir,
+                    "; ".join(deploy_issues),
+                )
+                return {
+                    "success": False,
+                    "error": "deploy_verification_failed",
+                    "episode_id": episode_id,
+                    "output_path": None,
+                    "issues": deploy_issues,
+                    "work_dir": work_dir,
+                }
+            logging.info("DEPLOY VERIFICATION SUCCESS: remote output matches local verified file.")
         else:
             _atomic_copy_local(final_srt_local, out_srt_path)
             logging.info("Atomically wrote local subtitle to %s", out_srt_path)

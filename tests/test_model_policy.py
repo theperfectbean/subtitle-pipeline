@@ -14,6 +14,7 @@ from core.config import load_show
 from core.pipeline import (
     _atomic_copy_local,
     _classify_structural_failure,
+    _verify_deployed_target_srt,
     _max_primary_attempts_for_structural_failure,
     _should_immediately_escalate_structural_failure,
     _should_start_chunk_on_escalation,
@@ -33,6 +34,7 @@ from translate import (
     _select_bakeoff_episodes,
     _should_stop_bakeoff_candidate,
     _run_with_concurrency_limit,
+    _resolve_concurrency,
     _validate_bakeoff_target,
     _verify_local_translation,
 )
@@ -398,6 +400,92 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertEqual(("ssh",), (calls[2][0],))
         self.assertIn("rm -f", calls[2][1])
         self.assertFalse(calls[2][4])
+
+    def test_verify_deployed_target_srt_accepts_matching_remote_file(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        original_run_ssh = pipeline.run_ssh
+
+        class _Result:
+            def __init__(self, stdout, returncode=0, stderr=""):
+                self.stdout = stdout
+                self.returncode = returncode
+                self.stderr = stderr
+
+        def _fake_run_ssh(cmd, host, user, check=False):
+            if "stat -c %s" in cmd:
+                return _Result("11\n")
+            if "sha256sum" in cmd:
+                return _Result("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9\n")
+            raise AssertionError(f"Unexpected SSH command: {cmd}")
+
+        pipeline.run_ssh = _fake_run_ssh
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_path = os.path.join(tmpdir, "final.en.srt")
+                with open(local_path, "w", encoding="utf-8") as fh:
+                    fh.write("hello world")
+                self.assertEqual([], _verify_deployed_target_srt(local_path, "/remote/final.en.srt", cfg))
+        finally:
+            pipeline.run_ssh = original_run_ssh
+
+    def test_verify_deployed_target_srt_reports_hash_mismatch(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        original_run_ssh = pipeline.run_ssh
+
+        class _Result:
+            def __init__(self, stdout, returncode=0, stderr=""):
+                self.stdout = stdout
+                self.returncode = returncode
+                self.stderr = stderr
+
+        def _fake_run_ssh(cmd, host, user, check=False):
+            if "stat -c %s" in cmd:
+                return _Result("11\n")
+            if "sha256sum" in cmd:
+                return _Result("different-hash\n")
+            raise AssertionError(f"Unexpected SSH command: {cmd}")
+
+        pipeline.run_ssh = _fake_run_ssh
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_path = os.path.join(tmpdir, "final.en.srt")
+                with open(local_path, "w", encoding="utf-8") as fh:
+                    fh.write("hello world")
+                issues = _verify_deployed_target_srt(local_path, "/remote/final.en.srt", cfg)
+        finally:
+            pipeline.run_ssh = original_run_ssh
+
+        self.assertEqual(1, len(issues))
+        self.assertIn("Deployed hash mismatch", issues[0])
+
+    def test_resolve_concurrency_prefers_cli_and_clamps_to_one(self):
+        original_value = os.environ.get("TRANSLATE_CONCURRENCY")
+        os.environ["TRANSLATE_CONCURRENCY"] = "5"
+        try:
+            self.assertEqual(3, _resolve_concurrency(3))
+            self.assertEqual(1, _resolve_concurrency(0))
+        finally:
+            if original_value is None:
+                os.environ.pop("TRANSLATE_CONCURRENCY", None)
+            else:
+                os.environ["TRANSLATE_CONCURRENCY"] = original_value
+
+    def test_resolve_concurrency_uses_environment_fallback(self):
+        original_value = os.environ.get("TRANSLATE_CONCURRENCY")
+        try:
+            os.environ["TRANSLATE_CONCURRENCY"] = "4"
+            self.assertEqual(4, _resolve_concurrency(None))
+            os.environ["TRANSLATE_CONCURRENCY"] = "0"
+            self.assertEqual(1, _resolve_concurrency(None))
+            os.environ["TRANSLATE_CONCURRENCY"] = "bad"
+            self.assertEqual(1, _resolve_concurrency(None))
+            os.environ.pop("TRANSLATE_CONCURRENCY", None)
+            self.assertEqual(1, _resolve_concurrency(None))
+        finally:
+            if original_value is None:
+                os.environ.pop("TRANSLATE_CONCURRENCY", None)
+            else:
+                os.environ["TRANSLATE_CONCURRENCY"] = original_value
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(

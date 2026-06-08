@@ -164,6 +164,7 @@ def parse_args() -> argparse.Namespace:
                    help='Override Gemini thinking level for the escalation backend')
     p.add_argument('--force',      action='store_true', help='Re-translate even if target SRT already exists')
     p.add_argument('--chunk-size', type=int, default=None, help='Override chunk_size from YAML')
+    p.add_argument('--concurrency', type=int, default=None, help='Maximum episodes to process in parallel')
     p.add_argument('target',       help='"all", "SxxExx" (e.g. S02E01), or "Sxx" (e.g. S02)')
     return p.parse_args()
 
@@ -346,6 +347,21 @@ async def _run_with_concurrency_limit(limit: int, coroutines: List[asyncio.Futur
             return await coro
 
     return await asyncio.gather(*[_guard(coro) for coro in coroutines])
+
+
+def _resolve_concurrency(cli_value: Optional[int]) -> int:
+    raw_value = cli_value
+    if raw_value is None:
+        env_value = os.environ.get("TRANSLATE_CONCURRENCY", "").strip()
+        if env_value:
+            try:
+                raw_value = int(env_value)
+            except ValueError:
+                logging.warning("Ignoring invalid TRANSLATE_CONCURRENCY=%r; defaulting to 1.", env_value)
+                raw_value = 1
+        else:
+            raw_value = 1
+    return max(1, int(raw_value))
 
 
 async def _run_bakeoff_candidate(
@@ -591,13 +607,14 @@ async def main() -> None:
         cfg.gemini_thinking_level = args.gemini_thinking_level
     if args.escalation_thinking_level is not None:
         cfg.escalation_thinking_level = args.escalation_thinking_level
+    concurrency = _resolve_concurrency(args.concurrency)
     dry_run = args.dry_run or os.environ.get('DRY_RUN', '0') == '1'
     force   = args.force   or os.environ.get('FORCE',   '0') == '1'
     target  = args.target
 
     logging.info(
-        "=== Translation Run: show=%s, target=%s, DRY_RUN=%s, BAKEOFF=%s, FORCE=%s, CHUNK_SIZE=%d ===",
-        cfg.name, target, dry_run, args.bakeoff, force, cfg.chunk_size,
+        "=== Translation Run: show=%s, target=%s, DRY_RUN=%s, BAKEOFF=%s, FORCE=%s, CHUNK_SIZE=%d, CONCURRENCY=%d ===",
+        cfg.name, target, dry_run, args.bakeoff, force, cfg.chunk_size, concurrency,
     )
 
     # Verify SSH connection to media server
@@ -641,7 +658,7 @@ async def main() -> None:
     mkv_map = _build_mkv_path_map(cfg, matching_episode_ids) if not dry_run else {}
 
     usage = make_usage_tracker()
-    found_episodes = 0
+    matching_episodes = []
     for srt_path in srt_paths:
         ep_match = re.search(r'S\d{2}E\d{2}', srt_path)
         if not ep_match:
@@ -649,19 +666,25 @@ async def main() -> None:
         ep_id = ep_match.group(0)
         if not _matches_target(ep_id, target):
             continue
-        found_episodes += 1
         if dry_run:
             continue
+        matching_episodes.append((ep_id, srt_path, mkv_map.get(ep_id) or _find_mkv_path(cfg, ep_id)))
 
-        mkv_path = mkv_map.get(ep_id) or _find_mkv_path(cfg, ep_id)
+    found_episodes = len(matching_episode_ids)
+    if not dry_run and matching_episodes:
+        async def _process_one(ep_id: str, srt_path: str, mkv_path: str) -> None:
+            try:
+                await process_episode(
+                    ep_id, srt_path, mkv_path, cfg, backend, escalation_backend,
+                    dry_run=False, force=force, usage=usage,
+                )
+            except Exception as e:
+                logging.exception("Exception raised while processing %s: %s", ep_id, e)
 
-        try:
-            await process_episode(
-                ep_id, srt_path, mkv_path, cfg, backend, escalation_backend,
-                dry_run=False, force=force, usage=usage,
-            )
-        except Exception as e:
-            logging.exception("Exception raised while processing %s: %s", ep_id, e)
+        await _run_with_concurrency_limit(
+            concurrency,
+            [_process_one(ep_id, srt_path, mkv_path) for ep_id, srt_path, mkv_path in matching_episodes],
+        )
 
     if found_episodes == 0:
         logging.warning("No matching episodes found (target=%s)", target)

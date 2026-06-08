@@ -103,6 +103,7 @@ python3 translate.py --show shows/your-show.yaml S02E01
 python3 translate.py --show shows/your-show.yaml --dry-run S02E01
 python3 translate.py --show shows/your-show.yaml --force S02E01
 python3 translate.py --show shows/your-show.yaml --chunk-size 50 S02
+python3 translate.py --show shows/your-show.yaml --concurrency 2 S02
 
 # Diagnostic model bakeoff. Use sparingly; production optimization belongs in the normal translation path.
 BAKEOFF_MAX_EPISODES=3 BAKEOFF_CONCURRENCY=2 python3 translate.py --show shows/your-show.yaml --bakeoff S02
@@ -118,6 +119,7 @@ python3 transcribe.py --show shows/your-show.yaml S02E01
 |-----|--------|
 | `DRY_RUN=1` | Same as `--dry-run` |
 | `FORCE=1`   | Same as `--force` |
+| `TRANSLATE_CONCURRENCY=N` | Production translation only: cap concurrent episodes |
 | `BAKEOFF_MAX_EPISODES=N` | Diagnostic bakeoff only: cap selected episodes |
 | `BAKEOFF_CONCURRENCY=N` | Diagnostic bakeoff only: cap concurrent candidates |
 | `BAKEOFF_MAX_VERIFIER_ISSUES=N` | Diagnostic bakeoff only: stop a candidate once verifier issues exceed N |
