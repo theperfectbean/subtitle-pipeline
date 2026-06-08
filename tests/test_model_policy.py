@@ -12,11 +12,13 @@ from core.backends.gemini import _thinking_config_for_model
 from core.backends.openai import OpenAITranslationBackend
 from core.config import load_show
 from core.pipeline import (
+    _atomic_copy_local,
     _classify_structural_failure,
     _max_primary_attempts_for_structural_failure,
     _should_immediately_escalate_structural_failure,
     _should_start_chunk_on_escalation,
     _should_retry_then_escalate_structural_failure,
+    _upload_file_atomic,
     _verify_existing_target_srt,
     make_usage_tracker,
     process_episode,
@@ -345,6 +347,57 @@ class ModelPolicyTests(unittest.TestCase):
                 rendered = fh.read()
             self.assertIn("Fresh English sentence", rendered)
             self.assertNotIn("Stale English sentence", rendered)
+
+    def test_atomic_copy_local_replaces_destination_after_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_path = os.path.join(tmpdir, "src.srt")
+            dest_path = os.path.join(tmpdir, "dest.srt")
+            with open(src_path, "w", encoding="utf-8") as fh:
+                fh.write("new subtitles")
+            with open(dest_path, "w", encoding="utf-8") as fh:
+                fh.write("old subtitles")
+
+            _atomic_copy_local(src_path, dest_path)
+
+            with open(dest_path, "r", encoding="utf-8") as fh:
+                self.assertEqual("new subtitles", fh.read())
+            self.assertFalse(any(name.endswith(f".codex-upload-{os.getpid()}") for name in os.listdir(tmpdir)))
+
+    def test_upload_file_atomic_promotes_uploaded_temp_file(self):
+        cfg = load_show("/home/admin/subtitle-pipeline/shows/pumuckl-1982.yaml")
+        original_upload_file = pipeline.upload_file
+        original_run_ssh = pipeline.run_ssh
+        calls = []
+
+        def _fake_upload_file(local_path, remote_path, host, user):
+            calls.append(("upload", local_path, remote_path, host, user))
+
+        def _fake_run_ssh(cmd, host, user, check=True):
+            calls.append(("ssh", cmd, host, user, check))
+
+            class Result:
+                returncode = 0
+                stdout = ""
+
+            return Result()
+
+        pipeline.upload_file = _fake_upload_file
+        pipeline.run_ssh = _fake_run_ssh
+        try:
+            _upload_file_atomic("/tmp/final.en.srt", "/remote/final.en.srt", cfg)
+        finally:
+            pipeline.upload_file = original_upload_file
+            pipeline.run_ssh = original_run_ssh
+
+        self.assertEqual("upload", calls[0][0])
+        self.assertTrue(calls[0][2].startswith("/remote/final.en.srt.codex-upload-"))
+        self.assertEqual(("ssh",), (calls[1][0],))
+        self.assertIn("mv -f", calls[1][1])
+        self.assertIn(calls[0][2], calls[1][1])
+        self.assertIn("/remote/final.en.srt", calls[1][1])
+        self.assertEqual(("ssh",), (calls[2][0],))
+        self.assertIn("rm -f", calls[2][1])
+        self.assertFalse(calls[2][4])
 
     def test_select_bakeoff_episodes_respects_target_and_limit(self):
         episodes = _select_bakeoff_episodes(

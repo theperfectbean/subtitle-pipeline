@@ -12,6 +12,7 @@ import logging
 import asyncio
 import hashlib
 import math
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -337,6 +338,42 @@ def _verify_existing_target_srt(out_srt_path: str, cfg: ShowConfig, deploy: bool
             return _target_srt_issues(f.read(), cfg)
     except Exception as exc:
         return [f"Could not verify existing output: {exc}"]
+
+
+def _atomic_copy_local(src_path: str, dest_path: str) -> None:
+    """Copy to a same-directory temp file, then atomically replace destination."""
+    tmp_path = f"{dest_path}.codex-upload-{os.getpid()}"
+    try:
+        shutil.copy2(src_path, tmp_path)
+        os.replace(tmp_path, dest_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError as exc:
+                logging.warning("Could not remove local temp subtitle %s: %s", tmp_path, exc)
+
+
+def _upload_file_atomic(local_path: str, remote_path: str, cfg: ShowConfig) -> None:
+    """Upload to a target-directory temp file, then atomically promote remotely."""
+    remote_tmp = f"{remote_path}.codex-upload-{os.getpid()}"
+    try:
+        upload_file(local_path, remote_tmp, cfg.media_host, cfg.media_user)
+        run_ssh(
+            f"mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_path)}",
+            cfg.media_host,
+            cfg.media_user,
+        )
+    finally:
+        try:
+            run_ssh(
+                f"rm -f {shlex.quote(remote_tmp)}",
+                cfg.media_host,
+                cfg.media_user,
+                check=False,
+            )
+        except Exception as exc:
+            logging.warning("Could not remove remote temp subtitle %s: %s", remote_tmp, exc)
 
 # ── Translation Core ──────────────────────────────────────────────────────────
 
@@ -841,11 +878,11 @@ async def process_episode(
         logging.info("FINAL TARGET VERIFICATION SUCCESS: no target-side issues detected.")
 
         if deploy:
-            logging.info("Uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
-            upload_file(final_srt_local, out_srt_path, cfg.media_host, cfg.media_user)
+            logging.info("Atomically uploading completed subtitles to %s at %s", cfg.media_host, out_srt_path)
+            _upload_file_atomic(final_srt_local, out_srt_path, cfg)
         else:
-            shutil.copy2(final_srt_local, out_srt_path)
-            logging.info("Wrote local bakeoff subtitle to %s", out_srt_path)
+            _atomic_copy_local(final_srt_local, out_srt_path)
+            logging.info("Atomically wrote local subtitle to %s", out_srt_path)
 
         state['status'] = 'complete'
         save_state(episode_id, state, active_state_dir)
