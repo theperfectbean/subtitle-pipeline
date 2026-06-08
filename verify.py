@@ -17,7 +17,7 @@ import logging
 import argparse
 import tempfile
 import shutil
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from core.config import load_show, ShowConfig
 from core.transfer import run_ssh, download_file
@@ -45,6 +45,24 @@ SPAM_PATTERNS      = ['osdb.link', 'subscene', 'opensubtitles', 'addic7ed']
 EN_FRAGMENTS   = [' the ', ' and ', ' of ']
 DE_INDICATORS  = [' der ', ' die ', ' das ', ' und ', ' ist ', ' nicht ', ' dass ']
 REASONING_TAGS = ['<thinking>', '</thinking>', '**thinking**', 'reasoning:']
+HTML_TAG_RE = re.compile(r'</?[a-zA-Z][^>\n]{0,200}>')
+HTML_MARKUP_PATTERNS = ['<br', '<font', '</', '&nbsp;']
+SUSPICIOUS_LITERAL_PATTERNS = [
+    (re.compile(r'\bstews?\b', re.IGNORECASE), "suspicious literal term 'stews'"),
+    (re.compile(r'\bhooking hard\b', re.IGNORECASE), "suspicious literal phrase 'hooking hard'"),
+    (
+        re.compile(
+            r'\binvest\b(?=.*\b(glasses|spectacles|red hair|see|look|wear|put|sea|seas)\b)',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        "suspicious literal term 'invest' in broken context",
+    ),
+]
+FILENAME_TYPO_PATTERNS = [
+    (re.compile(r'Kobolds law', re.IGNORECASE), "known English metadata typo: 'Kobolds law'"),
+    (re.compile(r'hickup', re.IGNORECASE), "known English metadata typo: 'hickup'"),
+    (re.compile(r'New Years Eve', re.IGNORECASE), "known English metadata typo: 'New Years Eve'"),
+]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,9 +84,55 @@ def _ep_title(srt_basename: str, source_lang: str) -> str:
     return title.strip()
 
 
+def _normalize_match_text(text: str) -> str:
+    """Collapse whitespace so term matching survives subtitle line breaks."""
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+def _suspicious_literal_issue(text: str) -> Optional[str]:
+    """Return a suspicious-literal issue for obviously broken English cues."""
+    for pattern, message in SUSPICIOUS_LITERAL_PATTERNS:
+        if pattern.search(text):
+            return message
+
+    normalized = _normalize_match_text(text)
+    if 'red hair' in normalized and re.search(r'\b(man|guy|fellow|chap|one|with)\b', normalized):
+        return "suspicious literal phrase 'red hair'"
+
+    return None
+
+
+def check_filename_metadata(filename: str) -> List[str]:
+    """Report known filename/title metadata typos without changing the file."""
+    issues: List[str] = []
+    for pattern, message in FILENAME_TYPO_PATTERNS:
+        if pattern.search(filename):
+            issues.append(f"Filename/title lint: {message}")
+    return issues
+
+
+def check_source_warnings(blocks: List[dict], cfg: ShowConfig) -> List[str]:
+    """Scan source cues for show-specific transcript quality warnings."""
+    issues: List[str] = []
+    for warning in cfg.source_warnings:
+        pattern_text = warning.get('pattern', '')
+        message = warning.get('message', '')
+        if not pattern_text or not message:
+            continue
+        try:
+            pattern = re.compile(pattern_text, re.IGNORECASE)
+        except re.error as exc:
+            issues.append(f"Invalid source warning pattern {pattern_text!r}: {exc}")
+            continue
+        for block in blocks:
+            if pattern.search(block['text']):
+                issues.append(f"Block {block['seq']}: source warning: {message}")
+    return issues
+
+
 # ── Check function ────────────────────────────────────────────────────────────
 
-def check_srt(content: str, lang: str) -> List[str]:
+def check_srt(content: str, lang: str, cfg: Optional[ShowConfig] = None) -> List[str]:
     """Run all structural and content checks. Returns list of issue strings."""
     issues: List[str] = []
 
@@ -126,6 +190,9 @@ def check_srt(content: str, lang: str) -> List[str]:
 
     # Language-specific checks
     if lang == 'de':
+        if cfg and lang == cfg.source_lang:
+            issues.extend(check_source_warnings(blocks, cfg))
+
         for b in blocks:
             padded = f" {b['text'].lower()} "
             for word in EN_FRAGMENTS:
@@ -156,8 +223,19 @@ def check_srt(content: str, lang: str) -> List[str]:
         if '**' in full_text:
             issues.append("Bold markers (**) detected")
 
-        if '<font' in lower_text or '</font>' in lower_text:
-            issues.append("HTML font tags (<font>) detected in English output")
+        for marker in HTML_MARKUP_PATTERNS:
+            if marker in lower_text:
+                issues.append(f"HTML/subtitle markup detected in English output: {marker!r}")
+                break
+        else:
+            if HTML_TAG_RE.search(full_text):
+                issues.append("HTML-like tag detected in English output")
+
+        for b in blocks:
+            for pattern, message in SUSPICIOUS_LITERAL_PATTERNS:
+                if pattern.search(b['text']):
+                    issues.append(f"Block {b['seq']}: {message}")
+                    break
 
     return issues
 
@@ -168,12 +246,12 @@ def check_translations(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowCo
 
     if len(de_blocks) != len(en_blocks):
         issues.append(f"Block count mismatch: German has {len(de_blocks)} blocks, English has {len(en_blocks)} blocks")
-        return issues
 
     for i, (de_b, en_b) in enumerate(zip(de_blocks, en_blocks)):
         seq = de_b['seq']
         de_text = de_b['text']
         en_text = en_b['text']
+        de_text_normalized = _normalize_match_text(de_text)
 
         # 1. Music symbol preservation check
         if '♪' in de_text and '♪' not in en_text:
@@ -192,7 +270,7 @@ def check_translations(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowCo
             if de_clean[-1].isalnum():
                 pattern_de += r"\b"
 
-            if re.search(pattern_de, de_text.lower()):
+            if re.search(pattern_de, de_text.lower()) or de_clean in de_text_normalized:
                 # Convert en_term to list of strings (synonyms)
                 if isinstance(en_term, list):
                     en_options = [str(x).lower() for x in en_term]
@@ -213,7 +291,9 @@ def check_translations(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowCo
                     for offset in [-1, 0, 1]:
                         idx = i + offset
                         if 0 <= idx < len(en_blocks):
-                            if re.search(pattern_en, en_blocks[idx]['text'].lower()) or en_opt in en_blocks[idx]['text'].lower():
+                            en_candidate = en_blocks[idx]['text'].lower()
+                            en_candidate_normalized = _normalize_match_text(en_blocks[idx]['text'])
+                            if re.search(pattern_en, en_candidate) or en_opt in en_candidate_normalized:
                                 found_en = True
                                 break
                     if found_en:
@@ -229,26 +309,72 @@ def check_translations(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowCo
 
 
 
-def evaluate_with_llm(de_blocks: List[dict], en_blocks: List[dict], client) -> Tuple[str, str]:
-    """Sample blocks and evaluate stylistic quality using Gemini."""
+def _llm_sample_indices(de_blocks: List[dict], en_blocks: List[dict], cfg: ShowConfig) -> List[int]:
+    """Pick broad coverage plus blocks that look likely to contain quality issues."""
+    if not de_blocks or not en_blocks:
+        return []
+
+    max_len = min(len(de_blocks), len(en_blocks))
+    step = max(1, max_len // 8)
+    indices = list(range(0, max_len, step))[:8]
+
+    suspicious: List[int] = []
+    for idx in range(max_len):
+        en_text = en_blocks[idx]['text']
+        en_lower = en_text.lower()
+        de_text = de_blocks[idx]['text']
+
+        if '**' in en_text or HTML_TAG_RE.search(en_text) or any(marker in en_lower for marker in HTML_MARKUP_PATTERNS):
+            suspicious.append(idx)
+            continue
+
+        padded = f" {en_lower} "
+        if sum(1 for w in DE_INDICATORS if w in padded) >= 2:
+            suspicious.append(idx)
+            continue
+
+        if any(pattern.search(en_text) for pattern, _ in SUSPICIOUS_LITERAL_PATTERNS):
+            suspicious.append(idx)
+            continue
+
+        for warning in cfg.source_warnings:
+            pattern_text = warning.get('pattern', '')
+            if not pattern_text:
+                continue
+            try:
+                if re.search(pattern_text, de_text, re.IGNORECASE):
+                    suspicious.append(idx)
+                    break
+            except re.error:
+                continue
+
+    for idx in suspicious:
+        if idx not in indices:
+            indices.append(idx)
+        if len(indices) >= 12:
+            break
+
+    return indices
+
+
+def evaluate_with_llm(de_blocks: List[dict], en_blocks: List[dict], client, cfg: ShowConfig) -> Tuple[str, str]:
+    """Sample blocks and evaluate stylistic quality using the configured judge model."""
     if not de_blocks or not en_blocks:
         return "SKIP", "No blocks to evaluate."
-    
-    # Sample up to 8 blocks evenly
-    step = max(1, len(de_blocks) // 8)
-    sample_indices = list(range(0, len(de_blocks), step))[:8]
-    
+
+    sample_indices = _llm_sample_indices(de_blocks, en_blocks, cfg)
+
     prompt = "Evaluate the following German to English subtitle translations for stylistic quality.\n\n"
-    prompt += "The source is 'Pumuckl', a Bavarian children's show. Pumuckl (a sprite) speaks playfully and in rhymes. Meister Eder speaks gruff, warm-hearted Bavarian.\n"
-    prompt += "Provide a rating of PASS or WARN on the first line, followed by a brief 1-2 sentence explanation of your reasoning focusing on tone, rhymes, and dialect translation.\n\n"
-    
+    prompt += f"The source is {cfg.name!r}. Evaluate whether the English reads naturally for the show's context and preserves character voice, wordplay, rhymes, and culturally specific terms where relevant.\n"
+    prompt += "Provide a rating of PASS or WARN on the first line, followed by a brief 1-2 sentence explanation focusing on translation quality, tone, and obvious mistranslations.\n\n"
+
     for idx in sample_indices:
         if idx < len(en_blocks):
             prompt += f"Block {de_blocks[idx]['seq']}:\nDE: {de_blocks[idx]['text']}\nEN: {en_blocks[idx]['text']}\n\n"
             
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model=cfg.llm_judge_model or cfg.translation_model or cfg.gemini_model,
             contents=prompt,
         )
         text = response.text.strip()
@@ -299,6 +425,13 @@ def main() -> None:
 
     llm_client = None
     if getattr(args, 'llm_judge', False):
+        judge_backend = (cfg.llm_judge_backend or cfg.translation_backend or "gemini").lower()
+        if judge_backend != "gemini":
+            logging.critical(
+                "Unsupported llm_judge_backend %r. Only 'gemini' is implemented currently.",
+                judge_backend,
+            )
+            sys.exit(1)
         if not genai:
             logging.critical("google-genai not installed. Cannot use --llm-judge.")
             sys.exit(1)
@@ -356,7 +489,6 @@ def main() -> None:
         total   = 0
         passing = 0
         failing = 0
-        all_issues: List[Tuple[str, str, str]] = []  # (ep_id, lang, issue)
 
         for srt_path in srt_paths:
             ep_match = re.search(r'S\d{2}E\d{2}', srt_path)
@@ -387,6 +519,7 @@ def main() -> None:
 
             de_issues: List[str] = []
             en_issues: List[str] = []
+            en_warnings: List[str] = check_filename_metadata(os.path.basename(en_path))
 
             # 1. Download and parse English target file first
             en_exists = run_ssh(
@@ -406,7 +539,7 @@ def main() -> None:
                         en_issues.append("File is empty")
                     else:
                         en_blocks = parse_srt(en_content)
-                        en_issues.extend(check_srt(en_content, cfg.target_lang))
+                        en_issues.extend(check_srt(en_content, cfg.target_lang, cfg))
                 except Exception as e:
                     en_issues.append(f"Download or read failed: {e}")
                     logging.error("%s [%s]: download or read failed: %s", ep_id, cfg.target_lang, e)
@@ -469,7 +602,7 @@ def main() -> None:
                 if not best_cand_content.strip():
                     de_issues.append("File is empty")
                 else:
-                    de_issues.extend(check_srt(best_cand_content, cfg.source_lang))
+                    de_issues.extend(check_srt(best_cand_content, cfg.source_lang, cfg))
 
                 if best_de_path != srt_path:
                     logging.info("%s: Matched against better German candidate source: %s", ep_id, os.path.basename(best_de_path))
@@ -477,8 +610,9 @@ def main() -> None:
             llm_verdict = None
             llm_reasoning = None
 
-            # Run cross-file translations checks if single-file checks didn't find critical errors
-            if not de_issues and not en_issues:
+            # Run cross-file checks whenever both files exist and parse, so one
+            # issue category does not hide another in the report.
+            if best_cand_content and en_blocks:
                 try:
                     with open(de_local, 'r', encoding='utf-8', errors='replace') as f:
                         de_content = f.read()
@@ -488,11 +622,12 @@ def main() -> None:
                     de_blocks = parse_srt(de_content)
                     en_blocks = parse_srt(en_content)
 
-                    trans_issues = check_translations(de_blocks, en_blocks, cfg)
-                    en_issues.extend(trans_issues)
+                    if de_blocks and en_blocks:
+                        trans_issues = check_translations(de_blocks, en_blocks, cfg)
+                        en_issues.extend(trans_issues)
 
-                    if llm_client:
-                        llm_verdict, llm_reasoning = evaluate_with_llm(de_blocks, en_blocks, llm_client)
+                        if llm_client:
+                            llm_verdict, llm_reasoning = evaluate_with_llm(de_blocks, en_blocks, llm_client, cfg)
                         
                 except Exception as e:
                     en_issues.append(f"Cross-translation verification failed: {e}")
@@ -508,8 +643,6 @@ def main() -> None:
                 passing += 1
             else:
                 failing += 1
-                for lang, issue in ep_issues:
-                    all_issues.append((ep_id, lang, issue))
 
             # Print episode result
             header = f"{title}"
@@ -524,6 +657,9 @@ def main() -> None:
                         print(f"  [{cfg.source_lang}] {issue}")
                 elif en_issues:
                     print(f"  [{cfg.source_lang}] No issues")
+            if en_warnings:
+                for issue in en_warnings:
+                    print(f"  [{cfg.target_lang}][warn] {issue}")
 
             if llm_client and llm_verdict is not None:
                 print(f"  [LLM Judge] {llm_verdict}: {llm_reasoning}")

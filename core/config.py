@@ -10,7 +10,7 @@ import re
 import sys
 import logging
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, List
 
 import yaml
 
@@ -33,8 +33,16 @@ class ShowConfig:
     media_host:             str             = "192.168.0.113"
     media_user:             str             = "admin"
     translation_backend:    str             = "gemini"
+    translation_model:      str             = "gemini-3.5-flash"
+    gemini_thinking_level:  str             = ""
+    escalation_backend:     str             = ""
+    escalation_model:       str             = ""
+    escalation_thinking_level: str          = ""
     transcription_backend:  str             = "assemblyai"
     gemini_model:           str             = "gemini-3.5-flash"
+    llm_judge_backend:      str             = ""
+    llm_judge_model:        str             = ""
+    source_warnings:        List[Dict[str, str]] = field(default_factory=list)
 
     # Derived at load time — not present in YAML
     show_slug:      str = ""
@@ -86,6 +94,14 @@ def load_show(path: str) -> ShowConfig:
     os.makedirs(state_dir, exist_ok=True)
     os.makedirs("/home/admin/logs", exist_ok=True)
 
+    translation_backend = raw.get('translation_backend', 'gemini')
+    legacy_gemini_model = raw.get('gemini_model', 'gemini-3.5-flash')
+    translation_model = raw.get('translation_model', legacy_gemini_model)
+    escalation_backend = raw.get('escalation_backend', translation_backend)
+    escalation_model = raw.get('escalation_model', '')
+    gemini_thinking_level = raw.get('gemini_thinking_level', '')
+    escalation_thinking_level = raw.get('escalation_thinking_level', '')
+
     return ShowConfig(
         name          = raw['name'],
         media_dir     = raw['media_dir'],
@@ -97,9 +113,17 @@ def load_show(path: str) -> ShowConfig:
         terminology   = raw.get('terminology') or {},
         media_host             = raw.get('media_host', '192.168.0.113'),
         media_user             = raw.get('media_user', 'admin'),
-        translation_backend    = raw.get('translation_backend', 'gemini'),
+        translation_backend    = translation_backend,
+        translation_model      = translation_model,
+        gemini_thinking_level  = gemini_thinking_level,
+        escalation_backend     = escalation_backend,
+        escalation_model       = escalation_model,
+        escalation_thinking_level = escalation_thinking_level,
         transcription_backend  = raw.get('transcription_backend', 'assemblyai'),
-        gemini_model           = raw.get('gemini_model', 'gemini-3.5-flash'),
+        gemini_model           = legacy_gemini_model,
+        llm_judge_backend      = raw.get('llm_judge_backend', translation_backend),
+        llm_judge_model        = raw.get('llm_judge_model', translation_model),
+        source_warnings        = raw.get('source_warnings') or [],
         show_slug     = slug,
         state_dir     = state_dir,
         translate_log  = f"{log_base}-translate.log",

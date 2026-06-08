@@ -6,15 +6,40 @@ chunk_size: 100
 media_host: "192.168.0.113"
 media_user: "admin"
 opensubtitles_imdb_id: "18952858"
+translation_backend: "gemini"
+translation_model: "gemini-3.5-flash"
+escalation_backend: "gemini"
+escalation_model: "gemini-3.1-pro-preview"
+llm_judge_backend: "gemini"
+llm_judge_model: "gemini-3.5-flash"
 
 terminology:
   "Kobold": "kobold"
   "Werkstatt": "workshop"
   "Schreiner": "carpenter"
   "Herr Eder": "Herr Eder"
+  "Bärbel": "Bärbel"
+  "Frau Stürzlinger": "Frau Stürzlinger"
+  "Stürzlinger": "Stürzlinger"
+  "Bürkel": "Bürkel"
+  "Burki": ["Burki", "Bürki"]
+  "Sörgitschew": "Sörgitschew"
+  "Krautmüller": "Krautmüller"
+  "Leberkäse": "Leberkäse"
+  "Allgäu": "Allgäu"
   "Himmels willen": "heaven's sake"
   "Himmelherrschaft": "heaven's dominion"
   "Himmeldonner": "heaven's thunder"
+
+source_warnings:
+  - pattern: '\bBrühen\b'
+    message: "Likely 'Brillen' when the context is glasses; review against audio."
+  - pattern: 'Westthieren'
+    message: "Likely bad transcription; review against audio."
+  - pattern: 'Sorgichef|Sockitschew|Sorgitschew'
+    message: "Likely spelling drift for 'Sörgitschew'."
+  - pattern: 'Stützlinger|Stürzinger'
+    message: "Likely spelling drift for 'Stürzlinger'."
 
 system_prompt: |
   You are translating German subtitles to English for the 2023 Austrian children's show "Neue Geschichten vom Pumuckl" (New Stories from Pumuckl).
@@ -34,6 +59,7 @@ system_prompt: |
   - Translate stage directions using asterisk format: * cheerful music *, * loud rumbling *, * laughs *, etc.
   - "Kobold" must ALWAYS remain "kobold" (lowercase, untranslated) — this is the established usage in the official English subtitles for this show.
   - "Herr Eder" must always remain "Herr Eder" — do not translate or alter.
+  - "Sörgitschew" must always remain "Sörgitschew" exactly as written, including the umlaut — do not anglicize or respell the name.
   - Preserve the character voices:
     * Pumuckl must speak in playful rhymes, childlike exclamations, and mischievous energy. Preserve his voice and maintain rhyme where possible.
     * Herr Eder must sound warm but flustered — he is a modern retiree, not an old-fashioned craftsman. Keep his speech plain and natural.
@@ -66,6 +92,15 @@ assemblyai_prompt: |
   - Kobold (means sprite or goblin — keep as-is)
   - Herr Eder (the main human character — "Herr" is his title)
   - Koboldschande (a compound word meaning "kobold's disgrace" — an important concept in the Pumuckl lore)
+  - Bärbel
+  - Frau Stürzlinger / Stürzlinger
+  - Bürkel / Burki
+  - Sörgitschew
+  - Krautmüller
+  - Leberkäse
+  - Allgäu
+
+  Preserve uncertain proper nouns as close to the heard name as possible rather than phonetically guessing a different common word.
 
   Audio characteristics:
   - Pumuckl's voice is intentionally pitch-shifted and may be difficult to parse — transcribe what is intelligible and leave gaps for unintelligible sections rather than guessing

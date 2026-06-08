@@ -45,8 +45,23 @@ class TranslationBackend(ABC):
 
     @property
     @abstractmethod
+    def provider(self) -> str:
+        """Provider identifier, e.g. gemini/openai/anthropic."""
+
+    @property
+    @abstractmethod
+    def model(self) -> str:
+        """Concrete model name for logging and bakeoff reporting."""
+
+    @property
+    @abstractmethod
     def max_tokens_per_chunk(self) -> int:
         """Approximate token budget per chunk for this backend/model."""
+
+    @property
+    def pricing_basis(self) -> Optional[dict]:
+        """Optional price metadata for reporting."""
+        return None
 
     @abstractmethod
     async def translate(self, prompt: str) -> Tuple[str, TranslationUsage]:

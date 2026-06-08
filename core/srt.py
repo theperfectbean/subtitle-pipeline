@@ -10,6 +10,9 @@ import textwrap
 from typing import Dict, List, Tuple
 
 _TS_START_RE = re.compile(r'^(\d{2}):(\d{2}):(\d{2}),(\d{1,3})')
+_FONT_TAG_RE = re.compile(r'</?font\b[^>]*>', re.IGNORECASE)
+_BR_TAG_RE = re.compile(r'<br\s*/?>', re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r'</?[a-zA-Z][^>\n]{0,200}>')
 
 # ── SRT Parsing & Normalization ───────────────────────────────────────────────
 
@@ -25,24 +28,38 @@ def parse_srt(content: str) -> List[Dict[str, str]]:
 
     blocks = []
     current = []
+    next_seq = 1
+
+    def _append_block(lines: List[str]) -> None:
+        nonlocal next_seq
+        if len(lines) < 2:
+            return
+
+        seq = ""
+        ts_index = 1
+        if re.match(r'^\d+$', lines[0]) and '-->' in lines[1]:
+            seq = lines[0]
+        elif '-->' in lines[0]:
+            seq = str(next_seq)
+            ts_index = 0
+        else:
+            return
+
+        text = '\n'.join(lines[ts_index + 1:]) if len(lines) > ts_index + 1 else ''
+        if text.strip():
+            blocks.append({'seq': seq, 'ts': lines[ts_index], 'text': text})
+            next_seq += 1
+
     for line in content.split('\n'):
         if line == '':
-            if (current and len(current) >= 2
-                    and re.match(r'^\d+$', current[0])
-                    and '-->' in current[1]):
-                text = '\n'.join(current[2:]) if len(current) > 2 else ''
-                if text.strip():
-                    blocks.append({'seq': current[0], 'ts': current[1], 'text': text})
+            if current:
+                _append_block(current)
             current = []
         else:
             current.append(line)
 
-    if (current and len(current) >= 2
-            and re.match(r'^\d+$', current[0])
-            and '-->' in current[1]):
-        text = '\n'.join(current[2:]) if len(current) > 2 else ''
-        if text.strip():
-            blocks.append({'seq': current[0], 'ts': current[1], 'text': text})
+    if current:
+        _append_block(current)
 
     return blocks
 
@@ -58,8 +75,19 @@ def render_blocks(blocks: List[Dict[str, str]], renumber: bool = True) -> str:
     return ""
 
 
+def normalize_subtitle_text(text: str) -> str:
+    """Normalize subtitle text artifacts that should never be rendered visibly."""
+    text = _BR_TAG_RE.sub('\n', text)
+    text = _FONT_TAG_RE.sub('', text)
+    text = text.replace('&nbsp;', ' ')
+    text = re.sub(r'[ \t]+([,.;:!?])', r'\1', text)
+    text = re.sub(r'\n(?:[ \t]*\n){2,}', '\n\n', text)
+    return text
+
+
 def wrap_subtitle_text(text: str, width: int = 45) -> str:
     """Programmatically wraps subtitle text to ensure readable line lengths on screen."""
+    text = normalize_subtitle_text(text)
     lines = text.split('\n')
     wrapped_lines = []
     for line in lines:
@@ -131,8 +159,13 @@ def validate_translation_structure(raw_text: str, chunk_blocks: List[Dict[str, s
     if "```" in raw_text:
         return False, "Markdown code fences (```) detected."
 
-    # 2. No leaked reasoning text / headers / preamble
+    # 2. No HTML/subtitle markup in model output
     lower_raw = raw_text.lower()
+    html_indicators = ["<br", "</font>", "<font", "&nbsp;"]
+    if any(indicator in lower_raw for indicator in html_indicators) or _HTML_TAG_RE.search(raw_text):
+        return False, "HTML or subtitle markup detected; output plain SRT text only with real line breaks."
+
+    # 3. No leaked reasoning text / headers / preamble
     # Note: ** markers are stripped before this runs, so bold-wrapped indicators
     # (e.g. "**thinking**") would never match and are intentionally omitted.
     reasoning_indicators = [
@@ -145,7 +178,7 @@ def validate_translation_structure(raw_text: str, chunk_blocks: List[Dict[str, s
         if indicator in lower_raw:
             return False, f"Leaked reasoning or metadata text detected (found indicator '{indicator}')."
 
-    # 3. Check for preamble / postamble:
+    # 4. Check for preamble / postamble:
     # First non-empty line of the raw text must be a sequence number (a digit)
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     if not lines:
@@ -155,14 +188,14 @@ def validate_translation_structure(raw_text: str, chunk_blocks: List[Dict[str, s
     if not first_line_clean.isdigit():
         return False, f"Preamble detected (output does not start with a sequence number): '{lines[0][:50]}...'"
 
-    # 4. Parse blocks
+    # 5. Parse blocks
     parsed_blocks = parse_srt(raw_text)
 
-    # 5. Block count match
+    # 6. Block count match
     if len(parsed_blocks) != expected_count:
         return False, f"Block count mismatch: expected {expected_count} blocks, got {len(parsed_blocks)}."
 
-    # 6. Timestamp preservation & occurrences check
+    # 7. Timestamp preservation & occurrences check
     arrow_count = raw_text.count("-->")
     if arrow_count != expected_count:
         return False, f"Timestamp count mismatch: expected {expected_count} '-->' indicators, got {arrow_count}."

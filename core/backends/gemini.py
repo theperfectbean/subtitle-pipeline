@@ -19,6 +19,28 @@ _PRICE_PER_M_INPUT  = 0.075
 _PRICE_PER_M_OUTPUT = 0.30
 _PRICE_PER_M_CACHED = 0.01875
 
+_THINKING_LEVELS = {
+    "minimal": types.ThinkingConfig(thinking_level="minimal"),
+    "low": types.ThinkingConfig(thinking_level="low"),
+    "medium": types.ThinkingConfig(thinking_level="medium"),
+    "high": types.ThinkingConfig(thinking_level="high"),
+}
+
+
+def _thinking_config_for_model(model: str, override_level: str = "") -> types.ThinkingConfig:
+    if override_level:
+        try:
+            return _THINKING_LEVELS[override_level.lower()]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported Gemini thinking level: {override_level!r}") from exc
+
+    model = model.lower()
+    if model.startswith("gemini-3.1-pro"):
+        return types.ThinkingConfig(thinking_level="low")
+    if model.startswith("gemini-3"):
+        return types.ThinkingConfig(thinking_level="minimal")
+    return types.ThinkingConfig(thinking_budget=0)
+
 
 # ── Backend ───────────────────────────────────────────────────────────────────
 
@@ -26,18 +48,35 @@ class GeminiTranslationBackend(TranslationBackend):
     """Gemini translation backend via google-genai SDK."""
 
     def __init__(self, api_key: str, system_prompt: str,
-                 model: str = "gemini-3.5-flash") -> None:
+                 model: str = "gemini-3.5-flash",
+                 thinking_level: str = "") -> None:
         self._client = genai.Client(api_key=api_key)
         self._model  = model
         self._config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=1.0,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            thinking_config=_thinking_config_for_model(model, thinking_level),
         )
+
+    @property
+    def provider(self) -> str:
+        return "gemini"
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     @property
     def max_tokens_per_chunk(self) -> int:
         return 8192
+
+    @property
+    def pricing_basis(self) -> dict:
+        return {
+            "input_per_m": _PRICE_PER_M_INPUT,
+            "cached_input_per_m": _PRICE_PER_M_CACHED,
+            "output_per_m": _PRICE_PER_M_OUTPUT,
+        }
 
     async def translate(self, prompt: str) -> Tuple[str, TranslationUsage]:
         try:

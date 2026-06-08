@@ -6,6 +6,7 @@ SSH/SCP helpers and retry logic for remote media-server file transfers.
 """
 
 import os
+import shlex
 import subprocess
 import logging
 import time
@@ -50,11 +51,18 @@ def download_file(remote_path: str, local_path: str, host: str, user: str,
 
 def upload_file(local_path: str, remote_path: str, host: str, user: str,
                 retries: int = 3, backoff: int = 10) -> None:
-    """SCP a local file to the media server, with retries."""
+    """Upload via remote /tmp + install so target path ownership doesn't matter."""
+    remote_tmp = f"/tmp/{os.path.basename(remote_path)}.codex-upload"
+
     def _do():
         subprocess.run(
             ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             local_path, f"{user}@{host}:{remote_path}"],
+             local_path, f"{user}@{host}:{remote_tmp}"],
             check=True,
         )
+        remote_cmd = (
+            f"install -m 0644 {shlex.quote(remote_tmp)} {shlex.quote(remote_path)}"
+            f" && rm -f {shlex.quote(remote_tmp)}"
+        )
+        run_ssh(remote_cmd, host, user)
     with_retry(f"upload {os.path.basename(remote_path)}", _do, attempts=retries, backoff=backoff)
